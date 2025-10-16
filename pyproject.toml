@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "real-estate-scrapper"
+version = "0.1.0"
+description = "Scraper Otodom (offers + photos) z możliwością rozszerzeń adapterów."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Zespół M1A5TO" }]
+dependencies = [
+  "httpx>=0.27",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.3",
+  "pydantic>=2.8",
+  "typer>=0.12",
+  "python-dotenv>=1.0",
+  "tenacity>=9.0",
+  "tqdm>=4.66",
+  "pandas>=2.2"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-httpx>=0.30", "ruff>=0.6", "mypy>=1.11", "types-requests", "types-python-dateutil"]
+
+[tool.typer]
+pretty_exceptions_enable = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E","F","I","UP","B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scrapper*"]
