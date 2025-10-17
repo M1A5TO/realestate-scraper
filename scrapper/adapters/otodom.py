@@ -22,7 +22,10 @@ BASE = "https://www.otodom.pl"
 OFFER_HREF_RE = re.compile(r"/pl/oferta/[^\"'#?]+")
 
 # czasem ID pojawia się jako sufiks -ID<digits> lub ?unique_id=<digits>
-OFFER_ID_RE = re.compile(r"(?:-ID|unique_id=)(\d{6,})")
+OFFER_ID_RE = re.compile(r"(?:-ID|[?&]unique_id=)([A-Za-z0-9]{4,})")
+
+NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', re.S)
+
 
 def _slug(s: str) -> str:
     s = s.strip().lower()
@@ -39,6 +42,88 @@ def _json_loads_safe(txt: str) -> Any | None:
 
 def _first(v):
     return v[0] if isinstance(v, list) and v else v
+
+def _deepget(d, path, default=None):
+    cur = d
+    for k in path:
+        if isinstance(cur, dict) and k in cur: cur = cur[k]
+        else: return default
+    return cur
+
+def _parse_next_data(html: str) -> dict[str, Any]:
+    m = NEXT_DATA_RE.search(html)
+    if not m:
+        return {}
+    try:
+        jd = json.loads(m.group(1))
+    except Exception:
+        return {}
+
+    # Otodom zwykle: props.pageProps.ad  (bywają też inne nazwy, dlatego kilka ścieżek)
+    ad = (
+        _deepget(jd, ["props", "pageProps", "ad"])
+        or _deepget(jd, ["props", "pageProps", "classified"])
+        or {}
+    )
+    out: dict[str, Any] = {}
+    if not isinstance(ad, dict):
+        return out
+
+    # Tytuł, opis
+    out["title"] = ad.get("title") or ad.get("name") or ""
+    out["description"] = ad.get("description") or ""
+
+    # Cena
+    price = ad.get("price") or {}
+    out["price_amount"] = _coerce_float(price.get("value") or price.get("amount"))
+    cur = price.get("currency") or price.get("currencyCode")
+    out["price_currency"] = str(cur).upper() if cur else None
+
+    # Lokalizacja
+    addr = ad.get("location") or ad.get("address") or {}
+    city = _deepget(addr, ["address", "city", "name"]) or _deepget(addr, ["city", "name"]) or addr.get("city")
+    dist = _deepget(addr, ["address", "district", "name"]) or _deepget(addr, ["district", "name"])
+    street = _deepget(addr, ["address", "street", "name"]) or _deepget(addr, ["street", "name"])
+    out["city"] = city
+    out["district"] = dist
+    out["street"] = street
+
+    # Geo
+    coords = ad.get("coordinates") or ad.get("geo") or {}
+    out["lat"] = _coerce_float(coords.get("latitude"))
+    out["lon"] = _coerce_float(coords.get("longitude"))
+
+    # Metryki
+    out["area_m2"] = _coerce_float(ad.get("area") or ad.get("usableArea") or ad.get("totalArea"))
+    out["rooms"] = _coerce_int(ad.get("rooms") or ad.get("roomsNumber") or ad.get("numberOfRooms"))
+    out["floor"] = _coerce_int(ad.get("floor") or _deepget(ad, ["level", "value"]))
+    out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
+    out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
+
+    # Typy rynku i nieruchomości
+    out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None  # primary/secondary
+    out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None  # mieszkanie/dom
+    out["building_type"] = (ad.get("buildingType") or _deepget(ad, ["building", "type"]) or None)
+
+    # Własność
+    out["ownership"] = ad.get("ownership") or _deepget(ad, ["legal", "ownership"])
+
+    # Agent / agencja / tel
+    contact = ad.get("contact") or {}
+    out["agent"] = contact.get("name") or contact.get("agentName")
+    out["agency"] = contact.get("agencyName") or _deepget(contact, ["agency", "name"])
+    out["phone"] = (contact.get("phone") or contact.get("phoneNumber") or "").strip() or None
+
+    # Daty
+    out["posted_at"] = _iso_or_none(ad.get("createdAt") or ad.get("publicationDate"))
+    out["updated_at"] = _iso_or_none(ad.get("updatedAt") or ad.get("modificationDate"))
+
+    # Cechy
+    feats = ad.get("features") or ad.get("amenities")
+    if isinstance(feats, list):
+        out["features"] = ", ".join(sorted(str(x).strip() for x in feats if x))
+    return out
+
 
 def _coerce_float(x) -> float | None:
     try:
@@ -106,7 +191,21 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
                 out["price_amount"] = _coerce_float(price)
             if currency:
                 out["price_currency"] = str(currency).upper()
-
+            if "@graph" in d and isinstance(d["@graph"], list):
+                for g in d["@graph"]:
+                    if isinstance(g, dict):
+                        candidates.append(g)
+            # już istniejące odczyty zostaw; dodaj:
+            if "numberOfRooms" in d and d["numberOfRooms"] is not None:
+                out["rooms"] = _coerce_int(_first(d["numberOfRooms"]))
+            if "floorLevel" in d:
+                out["floor"] = _coerce_int(_first(d["floorLevel"]))
+            if "numberOfFloors" in d:
+                out["max_floor"] = _coerce_int(_first(d["numberOfFloors"]))
+            if "yearBuilt" in d:
+                out["year_built"] = _coerce_int(_first(d["yearBuilt"]))
+            if "category" in d:
+                out["property_type"] = str(d["category"]).lower()
             # Tytuł / opis
             if "name" in d and not out.get("title"):
                 out["title"] = str(d["name"]).strip()
@@ -287,6 +386,15 @@ class OtodomAdapter(BaseAdapter):
         # 1) LD+JSON
         ld = _parse_ld_json_offer(html)
         data.update({k: v for k, v in ld.items() if k != "photos_from_json"})
+
+        nd = _parse_next_data(html)
+        for k, v in nd.items():
+            if k not in data or data[k] in (None, "", 0):
+                data[k] = v
+
+        fb = _parse_fallback_css(html)
+        for k, v in fb.items():
+            data.setdefault(k, v)
 
         # 2) Fallback CSS
         fb = _parse_fallback_css(html)
