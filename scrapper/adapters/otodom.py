@@ -1,4 +1,4 @@
-# scrapper/adapters/otodom.py
+# adapters/otodom.py
 from __future__ import annotations
 
 import json
@@ -9,54 +9,36 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from scrapper.adapters.base import BaseAdapter, OfferIndex
+from scrapper.adapters.base import BaseAdapter, OfferIndex, PhotoMeta
 from scrapper.core.dedup import DedupeSet, normalize_url
 from scrapper.core.http import HttpClient, join_url
+from scrapper.core.images import download_photo
 from scrapper.core.parse import find_ld_json_all, select_text, soup
-from scrapper.core.storage import append_rows_csv, offers_csv_path, urls_csv_path
+from scrapper.core.storage import append_rows_csv, offers_csv_path, photos_csv_path, urls_csv_path
 
 BASE = "https://www.otodom.pl"
+
+# heurystyka: linki do ofert mają segment /pl/oferta/
 OFFER_HREF_RE = re.compile(r"/pl/oferta/[^\"'#?]+")
+
+# czasem ID pojawia się jako sufiks -ID<digits> lub ?unique_id=<digits>
 OFFER_ID_RE = re.compile(r"(?:-ID|unique_id=)(\d{6,})")
 
-
-def _build_listing_url(city: str, deal: str, kind: str, page: int) -> str:
-    city_slug = (
-        city.strip().lower().replace(" ", "-")
-        .replace("ą", "a").replace("ć", "c").replace("ę", "e").replace("ł", "l")
-        .replace("ń", "n").replace("ó", "o").replace("ś", "s").replace("ź", "z").replace("ż", "z")
-    )
-    return f"{BASE}/pl/oferty/{deal}/{kind}/{city_slug}?page={page}"
-
-
-def _extract_offer_links(html: str) -> list[str]:
-    s = soup(html)
-    hrefs: list[str] = []
-    for a in s.select("a[href]"):
-        h = a.get("href", "")
-        if OFFER_HREF_RE.search(h):
-            hrefs.append(h)
-    hrefs += OFFER_HREF_RE.findall(html)
-    out, seen = [], set()
-    for h in hrefs:
-        full = normalize_url(join_url(BASE, h))
-        if full not in seen:
-            seen.add(full)
-            out.append(full)
-    return out
-
-
-def _maybe_offer_id(url: str) -> str | None:
-    m = OFFER_ID_RE.search(url)
-    return m.group(1) if m else None
-
-
+def _slug(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"[ąćęłńóśżź]", lambda m: {
+        "ą":"a","ć":"c","ę":"e","ł":"l","ń":"n","ó":"o","ś":"s","ż":"z","ź":"z"
+    }[m.group(0)], s)
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
 def _json_loads_safe(txt: str) -> Any | None:
     try:
         return json.loads(txt)
     except Exception:
         return None
 
+def _first(v):
+    return v[0] if isinstance(v, list) and v else v
 
 def _coerce_float(x) -> float | None:
     try:
@@ -64,43 +46,58 @@ def _coerce_float(x) -> float | None:
     except Exception:
         return None
 
-
 def _coerce_int(x) -> int | None:
     try:
         return int(float(str(x).replace(" ", "").replace(",", ".")))
     except Exception:
         return None
 
-
 def _iso_or_none(s: str | None) -> datetime | None:
     if not s:
         return None
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+    ):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
             continue
     return None
 
-
 def _parse_ld_json_offer(html: str) -> dict[str, Any]:
+    """
+    Szuka bloków LD+JSON. Wyciąga: tytuł, cenę, walutę, adres, geolokację, cechy, zdjęcia, daty.
+    Schematy na portalach bywają różne: @type: Offer, Product, RealEstateListing itp.
+    """
     blocks = find_ld_json_all(html)
     out: dict[str, Any] = {}
     photos: list[str] = []
     for raw in blocks:
         data = _json_loads_safe(raw)
-        if not data:
+        if not data: 
             continue
+        # Uporządkuj listę możliwych kontenerów
         candidates = data if isinstance(data, list) else [data]
         for d in candidates:
             if not isinstance(d, dict):
                 continue
+            # 1) Listing/Offer/Product
+            # Cena i waluta bywają w Offer.priceSpecification albo Product.offers
             price = None
             currency = None
             if "offers" in d and isinstance(d["offers"], dict):
-                ospec = d["offers"].get("price") or d["offers"].get("priceSpecification", {}).get("price")
+                ospec = (
+                    d["offers"].get("price")
+                    or d["offers"].get("priceSpecification", {}).get("price")
+                )
                 price = ospec if ospec is not None else price
-                currency = d["offers"].get("priceCurrency") or d["offers"].get("priceSpecification", {}).get("priceCurrency")
+                currency = (
+                    d["offers"].get("priceCurrency")
+                    or d["offers"].get("priceSpecification", {}).get("priceCurrency")
+                )
             if "price" in d and price is None:
                 price = d.get("price")
             if "priceCurrency" in d and currency is None:
@@ -110,11 +107,13 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
             if currency:
                 out["price_currency"] = str(currency).upper()
 
+            # Tytuł / opis
             if "name" in d and not out.get("title"):
                 out["title"] = str(d["name"]).strip()
             if "description" in d and not out.get("description"):
                 out["description"] = str(d["description"]).strip()
 
+            # Adres i geo
             addr = d.get("address") or {}
             if isinstance(addr, dict):
                 out.setdefault("city", addr.get("addressLocality") or addr.get("addressRegion"))
@@ -124,9 +123,11 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
                 out["lat"] = _coerce_float(geo.get("latitude"))
                 out["lon"] = _coerce_float(geo.get("longitude"))
 
+            # Daty
             out.setdefault("posted_at", _iso_or_none(d.get("datePosted") or d.get("datePublished")))
             out.setdefault("updated_at", _iso_or_none(d.get("dateModified")))
 
+            # Zdjęcia z LD JSON (lista URL lub obiekty ImageObject)
             imgs = d.get("image") or d.get("photos") or []
             if isinstance(imgs, list):
                 for im in imgs:
@@ -135,6 +136,7 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
                     elif isinstance(im, dict) and im.get("url"):
                         photos.append(im["url"])
 
+            # Cechy i metryki (opcjonalnie)
             area = d.get("floorSize") or d.get("area") or {}
             if isinstance(area, dict) and "value" in area:
                 out["area_m2"] = _coerce_float(area["value"])
@@ -146,39 +148,87 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
         out["photos_from_json"] = photos
     return out
 
-
 def _parse_fallback_css(html: str) -> dict[str, Any]:
+    """Gdy brak/ubogie LD JSON: prosty odczyt z widocznych pól."""
     s = soup(html)
     out: dict[str, Any] = {}
+    # Tytuł
     t = select_text(s, "h1, h1[data-cy='adpage-header-title']")
-    if t:
+    if t: 
         out["title"] = t
+    # Cena
     ptxt = select_text(s, "[data-cy='adPageHeader-price'], .price-box, .css-1w6f3ze")
     if ptxt:
         m = re.search(r"([\d\s.,]+)", ptxt)
         if m:
             out["price_amount"] = _coerce_float(m.group(1))
         cur = "PLN" if "zł" in ptxt or "PLN" in ptxt.upper() else None
-        if cur:
+        if cur: 
             out["price_currency"] = cur
+    # Lokalizacja
     city = select_text(s, "[data-cy='adPageHeader-locality']")
-    if city:
+    if city: 
         out["city"] = city
+    # Metryki
     area = select_text(s, "ul, .css-1ci0qpi, .parameters li")
     if area:
         m = re.search(r"([\d.,]+)\s*m", area)
-        if m:
+        if m: 
             out["area_m2"] = _coerce_float(m.group(1))
+    # Opis
     desc = select_text(s, "[data-cy='adPage-description'], .description, [itemprop='description']")
-    if desc:
+    if desc: 
         out["description"] = desc
     return out
-
 
 def _offer_id_from_url(url: str) -> str | None:
     m = OFFER_ID_RE.search(url)
     return m.group(1) if m else None
 
+def _kind_path(kind: str) -> str:
+    # Otodom używa „mieszkanie”, „dom”
+    k = kind.strip().lower()
+    return "mieszkanie" if "mieszk" in k else "dom"
+
+def _deal_path(deal: str) -> str:
+    # „sprzedaz” lub „wynajem” w ścieżce
+    d = deal.strip().lower()
+    return "wynajem" if "naj" in d else "sprzedaz"
+
+def _build_listing_url(city: str, deal: str, kind: str, page: int) -> str:
+    """Nowy wzorzec listingu: /pl/oferty/{deal}/{kind}/{city_slug}?page=N."""
+    city_slug = (
+        city.strip().lower()
+        .replace(" ", "-")
+        .replace("ą", "a").replace("ć", "c").replace("ę", "e").replace("ł", "l")
+        .replace("ń", "n").replace("ó", "o").replace("ś", "s").replace("ź", "z").replace("ż", "z")
+    )
+    base = f"https://www.otodom.pl/pl/oferty/{deal}/{kind}/{city_slug}"
+    return f"{base}?page={page}"
+def _extract_offer_links(html: str) -> list[str]:
+    """Ostrożna ekstrakcja URL-i ofert z listingu. Fallback: każdy <a> dopasowany regexem."""
+    s = soup(html)
+    hrefs: list[str] = []
+    # 1) szybkie przejście po wszystkich <a>
+    for a in s.select("a[href]"):
+        h = a.get("href", "")
+        if OFFER_HREF_RE.search(h):
+            hrefs.append(h)
+    # 2) także z surowego HTML dla pewności (shadow DOM / data-href itp.)
+    hrefs += OFFER_HREF_RE.findall(html)
+    # normalizacja i dedupe lokalne
+    out = []
+    seen = set()
+    for h in hrefs:
+        full = normalize_url(join_url(BASE, h))
+        if full not in seen:
+            seen.add(full)
+            out.append(full)
+    return out
+
+def _maybe_offer_id(url: str) -> str | None:
+    m = OFFER_ID_RE.search(url)
+    return m.group(1) if m else None
 
 @dataclass
 class OtodomAdapter(BaseAdapter):
@@ -186,22 +236,22 @@ class OtodomAdapter(BaseAdapter):
     http: HttpClient | None = None
     out_dir: Path | None = None
 
-    def with_deps(self, http: HttpClient, out_dir: Path) -> "OtodomAdapter":
+    def with_deps(self, http: HttpClient, out_dir: Path) -> OtodomAdapter:
         self.http = http
         self.out_dir = out_dir
         return self
 
-    # P8 — listing
     def discover(self, *, city: str, deal: str, kind: str, max_pages: int = 1) -> Iterable[OfferIndex]:
         assert self.http is not None, "HttpClient not set. Call with_deps()."
         ded = DedupeSet()
         page = 1
+        found_total = 0
         while page <= max_pages:
             url = _build_listing_url(city, deal, kind, page)
             resp = self.http.get(url, accept="text/html")
             links = _extract_offer_links(resp.text)
             if not links and page > 1:
-                break
+                break  # brak wyników na kolejnej stronie → koniec
             for ln in links:
                 if ded.seen_url(ln):
                     continue
@@ -209,21 +259,24 @@ class OtodomAdapter(BaseAdapter):
                 oid = _maybe_offer_id(ln)
                 if oid:
                     idx["offer_id"] = oid
+                found_total += 1
                 yield idx
             page += 1
 
+    # Zapis urls.csv jako osobna funkcja narzędziowa (wywoływana z pipelines/discover.py)
     def write_urls_csv(self, rows: Iterable[OfferIndex]) -> Path:
         assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         header = ["offer_url", "offer_id", "page_idx"]
         path = urls_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
         return path
-
-    # P10 — szczegół
+    
+        # —————— SZCZEGÓŁ OFERTY ——————
     def parse_offer(self, url: str) -> dict[str, Any]:
         assert self.http is not None, "HttpClient not set. Call with_deps()."
         url = normalize_url(url)
-        html = self.http.get(url, accept="text/html").text
+        r = self.http.get(url, accept="text/html")
+        html = r.text
 
         data = {
             "offer_id": _offer_id_from_url(url) or "",
@@ -231,20 +284,29 @@ class OtodomAdapter(BaseAdapter):
             "url": url,
         }
 
+        # 1) LD+JSON
         ld = _parse_ld_json_offer(html)
         data.update({k: v for k, v in ld.items() if k != "photos_from_json"})
 
+        # 2) Fallback CSS
         fb = _parse_fallback_css(html)
         for k, v in fb.items():
             data.setdefault(k, v)
 
+        # 3) Normalizacja typów i podstawowe domyślne wartości
         if not data.get("price_currency") and data.get("price_amount"):
             data["price_currency"] = "PLN"
         data.setdefault("title", "")
         data.setdefault("description", "")
+
+        # 4) Pierwsze/ostatnie widzenie — tu nie ustawiamy; pipeline może dodać
+        # 5) Kopia surowego LD JSON (zabezpieczenie pod dalsze analizy)
+        if "photos_from_json" in ld:
+            data["json_raw"] = ""  # unikamy ogromnych rekordów; zostawiamy puste lub skrót
         return data
 
     def write_offers_csv(self, rows: Iterable[dict[str, Any]]) -> Path:
+        """Zapisuje rekordy ofert do offers.csv."""
         assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         header = [
             "offer_id","source","url","title","price_amount","price_currency",
@@ -254,5 +316,121 @@ class OtodomAdapter(BaseAdapter):
             "posted_at","updated_at","first_seen","last_seen"
         ]
         path = offers_csv_path(self.out_dir)
+        append_rows_csv(path, rows, header)
+        return path
+
+    # —————— ZDJĘCIA ——————
+    def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
+        """
+        Zwraca listę PhotoMeta: seq,url,(opcjonalnie width,height).
+        Preferuje listę z LD+JSON; fallback: atrybuty <img>, data-*.
+        """
+        assert self.http is not None, "HttpClient not set. Call with_deps()."
+        if html_or_url.startswith("http"):
+            html = self.http.get(html_or_url, accept="text/html").text
+        else:
+            html = html_or_url
+
+        out: list[PhotoMeta] = []
+        # 1) LD+JSON zdjęcia
+        ld = _parse_ld_json_offer(html)
+        photos = ld.get("photos_from_json", []) if isinstance(ld, dict) else []
+        for i, u in enumerate(photos):
+            if isinstance(u, str):
+                out.append({"seq": i, "url": normalize_url(join_url(BASE, u))})
+
+        # 2) Fallback: IMG w treści
+        if not out:
+            s = soup(html)
+            seq = 0
+            for im in s.select(
+                "img[src], img[data-src], img[data-lazy], img[data-cy='gallery-image']"
+            ):                
+                u = im.get("src") or im.get("data-src") or im.get("data-lazy")
+                if not u: 
+                    continue
+                u = normalize_url(join_url(BASE, u))
+                # prosta filtracja miniaturek
+                if "thumb" in u or "mini" in u:
+                    continue
+                out.append({"seq": seq, "url": u})
+                seq += 1
+
+        # 3) Dedupe po URL
+        seen=set()
+        uniq: list[PhotoMeta] = []
+        for ph in out:
+            u = ph["url"]
+            if u in seen: 
+                continue
+            seen.add(u)
+            uniq.append(ph)
+        return uniq
+
+    def download_and_write_photos(
+        self,
+        *,
+        offer_id: str,
+        offer_url: str,
+        photo_list: list[PhotoMeta],
+        img_root: Path,
+        limit: int | None = None,
+    ) -> Path:
+        """
+        Pobiera zdjęcia wg listy, zapisuje do katalogu {source}/{offer_id}/, 
+        tworzy wpisy w photos.csv.
+        """
+        assert self.http is not None and self.out_dir is not None, "Deps not set."
+        rows = []
+        count = 0
+        for ph in photo_list:
+            if limit is not None and count >= limit:
+                break
+            seq = int(ph.get("seq", count))
+            url = ph["url"]
+            try:
+                res = download_photo(self.http, url, img_root, self.source, offer_id, seq)
+                rows.append({
+                    "offer_id": offer_id,
+                    "source": self.source,
+                    "seq": seq,
+                    "url": url,
+                    "local_path": str(res.path),
+                    "width": ph.get("width"),
+                    "height": ph.get("height"),
+                    "bytes": res.bytes,
+                    "hash": res.sha256,
+                    "status": res.status,
+                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
+                })
+            except Exception:
+                rows.append({
+                    "offer_id": offer_id,
+                    "source": self.source,
+                    "seq": seq,
+                    "url": url,
+                    "local_path": "",
+                    "width": ph.get("width"),
+                    "height": ph.get("height"),
+                    "bytes": 0,
+                    "hash": "",
+                    "status": "failed",
+                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
+                })
+            count += 1
+        header = [
+            "offer_id",
+            "source",
+            "seq",
+            "url",
+            "local_path",
+            "width",
+            "height",
+            "bytes",
+            "hash",
+            "status",
+            "downloaded_at",
+        ]
+        path = photos_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
         return path
