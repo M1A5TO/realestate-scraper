@@ -243,37 +243,52 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
     return out
 
 def _parse_fallback_css(html: str) -> dict[str, Any]:
-    """Gdy brak/ubogie LD JSON: prosty odczyt z widocznych pól."""
     s = soup(html)
     out: dict[str, Any] = {}
+
     # Tytuł
-    t = select_text(s, "h1, h1[data-cy='adpage-header-title']")
-    if t: 
-        out["title"] = t
-    # Cena
-    ptxt = select_text(s, "[data-cy='adPageHeader-price'], .price-box, .css-1w6f3ze")
-    if ptxt:
-        m = re.search(r"([\d\s.,]+)", ptxt)
-        if m:
-            out["price_amount"] = _coerce_float(m.group(1))
-        cur = "PLN" if "zł" in ptxt or "PLN" in ptxt.upper() else None
-        if cur: 
-            out["price_currency"] = cur
-    # Lokalizacja
-    city = select_text(s, "[data-cy='adPageHeader-locality']")
-    if city: 
-        out["city"] = city
-    # Metryki
-    area = select_text(s, "ul, .css-1ci0qpi, .parameters li")
-    if area:
-        m = re.search(r"([\d.,]+)\s*m", area)
-        if m: 
-            out["area_m2"] = _coerce_float(m.group(1))
-    # Opis
-    desc = select_text(s, "[data-cy='adPage-description'], .description, [itemprop='description']")
-    if desc: 
-        out["description"] = desc
+    t = select_text(s, "h1, [data-cy='adpage-header-title'], [data-testid='ad-title']")
+    if t: out["title"] = t
+
+    # Cena: spróbuj widocznych węzłów, potem całościowy regex po tekście
+    price_node_txt = (
+        select_text(s, "[data-cy='adPageHeader-price']") or
+        select_text(s, "[data-testid='ad-price']") or
+        select_text(s, ".price, .price-box, [class*='price']")
+    )
+    txt_all = s.get_text(" ", strip=True)
+    cand_price = price_node_txt or txt_all
+    m = re.search(r"([\d\s.,]+)\s*(?:zł|PLN)", cand_price or "", re.I)
+    if m:
+        out["price_amount"] = _coerce_float(m.group(1))
+        out["price_currency"] = "PLN"
+
+    # Lokalizacja: breadcrumb / nagłówek
+    loc = (
+        select_text(s, "[data-cy='adPageHeader-locality']") or
+        select_text(s, "[data-testid='ad-locality']") or
+        select_text(s, "nav a[href*='/pl/oferty/']")  # okruszki
+    )
+    if loc: out["city"] = loc
+
+    # Metraż
+    # Szukaj „m²” w listach parametrów, a w razie czego w całym tekście:
+    params_txt = select_text(s, "[data-testid='ad-params'], .parameters, ul") + " " + txt_all
+    m = re.search(r"([\d.,]+)\s*m²|\bm2\b", params_txt.replace(" ", ""), re.I)
+    if m:
+        out["area_m2"] = _coerce_float(m.group(1))
+
+    # Pokoje
+    m = re.search(r"(\d{1,2})\s*(?:pokoje|pokój|pokoi)\b", params_txt, re.I)
+    if m:
+        out["rooms"] = _coerce_int(m.group(1))
+
+    # Ulica (opcjonalnie)
+    street = select_text(s, "[itemprop='streetAddress']") or select_text(s, "[data-testid='address-line']")
+    if street: out["street"] = street
+
     return out
+
 
 def _offer_id_from_url(url: str) -> str | None:
     m = OFFER_ID_RE.search(url)

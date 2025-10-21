@@ -31,7 +31,10 @@ class HttpClient:
         extra_headers: dict[str, str] | None = None,
     ):
         self._limiter = RateLimiter(rps)
-        headers = {"User-Agent": user_agent}
+        headers = {
+            "User-Agent": user_agent,
+            "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+        }
         if extra_headers:
             headers.update(extra_headers)
         self._client = httpx.Client(
