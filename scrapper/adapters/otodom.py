@@ -137,20 +137,15 @@ def _coerce_int(x) -> int | None:
     except Exception:
         return None
 
-def _iso_or_none(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    for fmt in (
-        "%Y-%m-%d",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%SZ",
-    ):
+def _iso_or_none(s: str | None) -> str | None:
+    if not s: return None
+    for fmt in ("%Y-%m-%d","%Y-%m-%dT%H:%M:%S%z","%Y-%m-%dT%H:%M:%S","%Y-%m-%dT%H:%M:%SZ"):
         try:
-            return datetime.strptime(s, fmt)
+            return datetime.strptime(s, fmt).isoformat()
         except Exception:
             continue
     return None
+
 
 def _parse_ld_json_offer(html: str) -> dict[str, Any]:
     """
@@ -391,10 +386,6 @@ class OtodomAdapter(BaseAdapter):
         for k, v in nd.items():
             if k not in data or data[k] in (None, "", 0):
                 data[k] = v
-
-        fb = _parse_fallback_css(html)
-        for k, v in fb.items():
-            data.setdefault(k, v)
 
         # 2) Fallback CSS
         fb = _parse_fallback_css(html)
