@@ -85,7 +85,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     # Cena
     price = ad.get("price") or {}
-    out["price_amount"] = _coerce_float(price.get("value") or price.get("amount"))
+    price_amt = _coerce_float(price.get("value") or price.get("amount"))
+    if price_amt is not None:
+        out["price_amount"] = price_amt
     cur = price.get("currency") or price.get("currencyCode")
     out["price_currency"] = str(cur).upper() if cur else None
 
@@ -109,8 +111,13 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     print(f"--- DEBUG: Wyekstrahowano lat={out.get('lat')}, lon={out.get('lon')} ---") #du
 
     # Metryki
-    out["area_m2"] = _coerce_float(ad.get("area") or ad.get("usableArea") or ad.get("totalArea"))
-    out["rooms"] = _coerce_int(ad.get("rooms") or ad.get("roomsNumber") or ad.get("numberOfRooms"))
+    area_val = _coerce_float(ad.get("area") or ad.get("usableArea") or ad.get("totalArea"))
+    if area_val is not None:
+        out["area_m2"] = area_val
+
+    rooms_val = _coerce_int(ad.get("rooms") or ad.get("roomsNumber") or ad.get("numberOfRooms"))
+    if rooms_val is not None:
+        out["rooms"] = rooms_val
     out["floor"] = _coerce_int(ad.get("floor") or _deepget(ad, ["level", "value"]))
     out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
     out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
@@ -421,7 +428,8 @@ class OtodomAdapter(BaseAdapter):
         # 2) Fallback CSS
         fb = _parse_fallback_css(html)
         for k, v in fb.items():
-            data.setdefault(k, v)
+            if k not in data or data[k] in (None, "", 0):
+                data[k] = v
 
         # 3) Normalizacja typów i podstawowe domyślne wartości
         if not data.get("price_currency") and data.get("price_amount"):
