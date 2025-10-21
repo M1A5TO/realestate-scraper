@@ -40,7 +40,7 @@ class HttpClient:
         self._client = httpx.Client(
             timeout=httpx.Timeout(timeout_s),
             headers=headers,
-            proxies=proxies or None,
+            #proxies=proxies or None,
             follow_redirects=True,
             http2=False,
         )

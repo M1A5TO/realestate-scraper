@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from bs4 import BeautifulSoup
 
 from scrapper.adapters.base import BaseAdapter, OfferIndex, PhotoMeta
 from scrapper.core.dedup import DedupeSet, normalize_url
@@ -51,12 +52,19 @@ def _deepget(d, path, default=None):
     return cur
 
 def _parse_next_data(html: str) -> dict[str, Any]:
-    m = NEXT_DATA_RE.search(html)
-    if not m:
+    print("--- DEBUG: Uruchomiono _parse_next_data ---") #czy funkcja działa
+    soup = BeautifulSoup(html, 'lxml')
+    script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
+    if not script_tag or not script_tag.string:
+        print("--- DEBUG: Nie znaleziono tagu <script id='__NEXT_DATA__'> lub jest pusty (metoda BeautifulSoup) ---")
         return {}
+    json_text = script_tag.string
+
     try:
-        jd = json.loads(m.group(1))
-    except Exception:
+        jd = json.loads(json_text)
+        print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")#du
+    except Exception as e:
+        print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")#du
         return {}
 
     # Otodom zwykle: props.pageProps.ad  (bywają też inne nazwy, dlatego kilka ścieżek)
@@ -67,7 +75,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     if not isinstance(ad, dict):
+        print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")#du
         return out
+    print("--- DEBUG: Znaleziono obiekt 'ad' ---")#du
 
     # Tytuł, opis
     out["title"] = ad.get("title") or ad.get("name") or ""
@@ -79,19 +89,24 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     cur = price.get("currency") or price.get("currencyCode")
     out["price_currency"] = str(cur).upper() if cur else None
 
+    location_data = _deepget(ad, ["location"]) or {}
+    print(f"--- DEBUG: location_data: {location_data} ---") #du
     # Lokalizacja
-    addr = ad.get("location") or ad.get("address") or {}
-    city = _deepget(addr, ["address", "city", "name"]) or _deepget(addr, ["city", "name"]) or addr.get("city")
-    dist = _deepget(addr, ["address", "district", "name"]) or _deepget(addr, ["district", "name"])
-    street = _deepget(addr, ["address", "street", "name"]) or _deepget(addr, ["street", "name"])
+    addr = location_data.get("address") or {}
+    print(f"--- DEBUG: addr: {addr} ---")#du
+    city = _deepget(addr, ["city", "name"]) 
+    dist = _deepget(addr, ["district", "name"])
+    street = _deepget(addr, ["street", "name"])
     out["city"] = city
     out["district"] = dist
     out["street"] = street
 
     # Geo
-    coords = ad.get("coordinates") or ad.get("geo") or {}
+    coords = location_data.get("coordinates") or {}
+    print(f"--- DEBUG: coords: {coords} ---")#du
     out["lat"] = _coerce_float(coords.get("latitude"))
     out["lon"] = _coerce_float(coords.get("longitude"))
+    print(f"--- DEBUG: Wyekstrahowano lat={out.get('lat')}, lon={out.get('lon')} ---") #du
 
     # Metryki
     out["area_m2"] = _coerce_float(ad.get("area") or ad.get("usableArea") or ad.get("totalArea"))
@@ -120,8 +135,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     # Cechy
     feats = ad.get("features") or ad.get("amenities")
+    print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")#du
     if isinstance(feats, list):
-        out["features"] = ", ".join(sorted(str(x).strip() for x in feats if x))
+        out["features"] = sorted([str(x).strip() for x in feats if x and str(x).strip()])
     return out
 
 

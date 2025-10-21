@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime
 from pathlib import Path
-
+from pydantic import ValidationError
 from scrapper.adapters.otodom import OtodomAdapter
 from scrapper.core.http import HttpClient, build_proxies
 from scrapper.core.log import setup_json_logger
@@ -63,6 +63,15 @@ def run_otodom_detail(
                 ok += 1
             except Exception as e:
                 fail += 1
+                err_name = type(e).__name__#duuuuuuuu
+                log_extra = {"extra": {"url": u, "err": err_name}}#du
+                if isinstance(e, ValidationError):
+                    print(f"--- DEBUG: Błąd walidacji Pydantic dla URL: {u} ---")
+                    try:
+                        print(e.errors())
+                    except AttributeError:
+                        print(str(e))
+                    log_extra["extra"]["validation_errors"] = e.errors()#duuuuu
                 log.warning(
                     "detail_parse_fail",
                     extra={"extra": {"url": u, "err": type(e).__name__}},
