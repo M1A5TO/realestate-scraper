@@ -11,6 +11,10 @@ from scrapper.core.log import setup_json_logger
 from scrapper.core.storage import offers_csv_path
 from scrapper.core.validate import Offer
 
+REQ_FIELDS = ["price_amount","city","area_m2","rooms","lat","lon","offer_id","source"]
+
+def _is_complete(d: dict) -> bool:
+    return all(d.get(k) not in (None, "") for k in REQ_FIELDS)
 
 def _read_urls(urls_csv: Path) -> list[str]:
     if not urls_csv.exists():
@@ -58,9 +62,19 @@ def run_otodom_detail(
                 data = adapter.parse_offer(u)
                 data.setdefault("first_seen", now)
                 data.setdefault("last_seen", now)
-                Offer(**data)
-                batch.append(data)
-                ok += 1
+                Offer(**data)  # walidacja typów/zakresów
+                if _is_complete(data):
+                    batch.append(data)
+                    ok += 1
+                else:
+                    fail += 1
+                    log.warning(
+                        "detail_incomplete_skip",
+                        extra={"extra": {
+                            "url": u,
+                            "missing": [k for k in REQ_FIELDS if data.get(k) in (None, "")]
+                        }},
+                    )
             except Exception as e:
                 fail += 1
                 err_name = type(e).__name__#duuuuuuuu

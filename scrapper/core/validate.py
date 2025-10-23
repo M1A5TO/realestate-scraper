@@ -12,6 +12,7 @@ class Offer(BaseModel):
     url: HttpUrl
     title: str = ""
     price_amount: float | None = Field(default=None, ge=0)
+    price_per_m2: float | None = Field(default=None, ge=0)
     price_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
     property_type: str | None = None
     market_type: str | None = None

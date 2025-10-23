@@ -27,6 +27,9 @@ OFFER_ID_RE = re.compile(r"(?:-ID|[?&]unique_id=)([A-Za-z0-9]{4,})")
 
 NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', re.S)
 
+PRICE_TOTAL_RE   = re.compile(r"(\d[\d\s.,]{3,})\s*zł(?!\s*/\s*m(?:2|²))", re.I)
+PRICE_PER_M2_RE  = re.compile(r"(\d[\d\s.,]{3,})\s*zł\s*/\s*m(?:2|²)", re.I)
+
 
 def _slug(s: str) -> str:
     s = s.strip().lower()
@@ -52,19 +55,19 @@ def _deepget(d, path, default=None):
     return cur
 
 def _parse_next_data(html: str) -> dict[str, Any]:
-    print("--- DEBUG: Uruchomiono _parse_next_data ---") #czy funkcja działa
-    soup = BeautifulSoup(html, 'lxml')
-    script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
+    print("--- DEBUG: Uruchomiono _parse_next_data ---")
+    bs = BeautifulSoup(html, "lxml")
+    script_tag = bs.find("script", {"id": "__NEXT_DATA__"})
     if not script_tag or not script_tag.string:
-        print("--- DEBUG: Nie znaleziono tagu <script id='__NEXT_DATA__'> lub jest pusty (metoda BeautifulSoup) ---")
+        print("--- DEBUG: Nie znaleziono __NEXT_DATA__ ---")
         return {}
     json_text = script_tag.string
 
     try:
         jd = json.loads(json_text)
-        print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")#du
+        print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")  # du
     except Exception as e:
-        print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")#du
+        print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")  # du
         return {}
 
     # Otodom zwykle: props.pageProps.ad  (bywają też inne nazwy, dlatego kilka ścieżek)
@@ -75,28 +78,57 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     if not isinstance(ad, dict):
-        print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")#du
+        print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")  # du
         return out
-    print("--- DEBUG: Znaleziono obiekt 'ad' ---")#du
+    print("--- DEBUG: Znaleziono obiekt 'ad' ---")  # du
+
+    # Czy to strona inwestycji/wielolokalowa?
+    pp = _deepget(jd, ["props", "pageProps"]) or {}
+    multi_units = bool(pp.get("paginatedUnits")) or bool(pp.get("developmentData"))
 
     # Tytuł, opis
     out["title"] = ad.get("title") or ad.get("name") or ""
     out["description"] = ad.get("description") or ""
 
-    # Cena
-    price = ad.get("price") or {}
-    price_amt = _coerce_float(price.get("value") or price.get("amount"))
-    if price_amt is not None:
-        out["price_amount"] = price_amt
-    cur = price.get("currency") or price.get("currencyCode")
-    out["price_currency"] = str(cur).upper() if cur else None
+    # --- CENY: z NEXT_DATA.topInformation ---
+    tmp_price_amount: float | None = None
+    tmp_price_per_m2: float | None = None
 
+    ti_list = ad.get("topInformation") or []
+    for ti in ti_list:
+        lab = (ti.get("label") or "").lower()
+        if lab == "price":
+            v = (ti.get("values") or [None])[0]
+            amt = _coerce_int(v)
+            if amt is not None:
+                tmp_price_amount = float(amt)
+        elif lab in ("price_per_m2", "price_per_sqm", "price_per_square_meter"):
+            raw = (ti.get("values") or [None])[0] or ti.get("localizedValue")
+            per = _coerce_float(raw)
+            if per is not None:
+                tmp_price_per_m2 = per
+
+    # Cena: z nagłówka HTML, ale NIE ustawiaj price_amount z banera na stronach multi_units
+    price_node_txt = (
+        select_text(bs, "[data-cy='adPageHeader-price']") or
+        select_text(bs, "[data-testid='ad-price']") or
+        select_text(bs, ".price, .price-box, [class*='price']")
+    )
+    if price_node_txt:
+        m_total = PRICE_TOTAL_RE.search(price_node_txt)
+        if m_total and not multi_units and tmp_price_amount is None:
+            tmp_price_amount = _coerce_float(m_total.group(1))
+        else:
+            m_pm2 = PRICE_PER_M2_RE.search(price_node_txt)
+            if m_pm2 and tmp_price_per_m2 is None:
+                tmp_price_per_m2 = _coerce_float(m_pm2.group(1))
+
+    # Lokalizacja (jak było)
     location_data = _deepget(ad, ["location"]) or {}
-    print(f"--- DEBUG: location_data: {location_data} ---") #du
-    # Lokalizacja
+    print(f"--- DEBUG: location_data: {location_data} ---")  # du
     addr = location_data.get("address") or {}
-    print(f"--- DEBUG: addr: {addr} ---")#du
-    city = _deepget(addr, ["city", "name"]) 
+    print(f"--- DEBUG: addr: {addr} ---")  # du
+    city = _deepget(addr, ["city", "name"])
     dist = _deepget(addr, ["district", "name"])
     street = _deepget(addr, ["street", "name"])
     out["city"] = city
@@ -105,10 +137,10 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     # Geo
     coords = location_data.get("coordinates") or {}
-    print(f"--- DEBUG: coords: {coords} ---")#du
+    print(f"--- DEBUG: coords: {coords} ---")  # du
     out["lat"] = _coerce_float(coords.get("latitude"))
     out["lon"] = _coerce_float(coords.get("longitude"))
-    print(f"--- DEBUG: Wyekstrahowano lat={out.get('lat')}, lon={out.get('lon')} ---") #du
+    print(f"--- DEBUG: Wyekstrahowano lat={out.get('lat')}, lon={out.get('lon')} ---")  # du
 
     # Metryki
     area_val = _coerce_float(ad.get("area") or ad.get("usableArea") or ad.get("totalArea"))
@@ -122,9 +154,19 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
     out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
 
+    # FINALIZACJA CEN po znaniu area_m2
+    if tmp_price_per_m2 is not None:
+        out["price_per_m2"] = tmp_price_per_m2
+        if out.get("area_m2") and tmp_price_amount is None:
+            tmp_price_amount = float(int(round(tmp_price_per_m2 * float(out["area_m2"]))))
+
+    if tmp_price_amount is not None:
+        out["price_amount"] = tmp_price_amount
+        out["price_currency"] = "PLN"
+
     # Typy rynku i nieruchomości
-    out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None  # primary/secondary
-    out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None  # mieszkanie/dom
+    out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None
+    out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None
     out["building_type"] = (ad.get("buildingType") or _deepget(ad, ["building", "type"]) or None)
 
     # Własność
@@ -142,21 +184,26 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     # Cechy
     feats = ad.get("features") or ad.get("amenities")
-    print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")#du
+    print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")  # du
     if isinstance(feats, list):
         out["features"] = sorted([str(x).strip() for x in feats if x and str(x).strip()])
     return out
 
 
+
 def _coerce_float(x) -> float | None:
     try:
-        return float(str(x).replace(" ", "").replace(",", "."))
+        s = str(x).strip().replace("\u00A0", " ").replace(" ", "").replace(",", ".")
+        # odfiltruj ewentualne sufiksy jak 'zł'
+        m = re.match(r"^[+-]?\d+(?:\.\d+)?", s)
+        return float(m.group(0)) if m else None
     except Exception:
         return None
 
 def _coerce_int(x) -> int | None:
     try:
-        return int(float(str(x).replace(" ", "").replace(",", ".")))
+        f = _coerce_float(x)
+        return int(f) if f is not None else None
     except Exception:
         return None
 
@@ -273,12 +320,21 @@ def _parse_fallback_css(html: str) -> dict[str, Any]:
     t = select_text(s, "h1, [data-cy='adpage-header-title'], [data-testid='ad-title']")
     if t: out["title"] = t
 
-    # Cena: spróbuj widocznych węzłów, potem całościowy regex po tekście
+    # Cena: tylko węzły cenowe. Bez skanowania całego dokumentu.
     price_node_txt = (
         select_text(s, "[data-cy='adPageHeader-price']") or
         select_text(s, "[data-testid='ad-price']") or
         select_text(s, ".price, .price-box, [class*='price']")
     )
+    if price_node_txt:
+        m = PRICE_TOTAL_RE.search(price_node_txt)
+        if m:
+            out["price_amount"] = _coerce_float(m.group(1))
+            out["price_currency"] = "PLN"
+        else:
+            m2 = PRICE_PER_M2_RE.search(price_node_txt)
+            if m2:
+                out["price_per_m2"] = _coerce_float(m2.group(1))
     txt_all = s.get_text(" ", strip=True)
     cand_price = price_node_txt or txt_all
     m = re.search(r"([\d\s.,]+)\s*(?:zł|PLN)", cand_price or "", re.I)
@@ -447,11 +503,12 @@ class OtodomAdapter(BaseAdapter):
         """Zapisuje rekordy ofert do offers.csv."""
         assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         header = [
-            "offer_id","source","url","title","price_amount","price_currency",
-            "property_type","market_type","city","district","street","lat","lon",
-            "area_m2","rooms","floor","max_floor","year_built","building_type",
-            "ownership","agent","agency","phone","description","features","json_raw",
-            "posted_at","updated_at","first_seen","last_seen"
+        "offer_id","source","url","title",
+        "price_amount","price_currency","price_per_m2",
+        "property_type","market_type","city","district","street","lat","lon",
+        "area_m2","rooms","floor","max_floor","year_built","building_type",
+        "ownership","agent","agency","phone","description","features","json_raw",
+        "posted_at","updated_at","first_seen","last_seen"
         ]
         path = offers_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
