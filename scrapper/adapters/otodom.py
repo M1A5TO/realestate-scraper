@@ -65,9 +65,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     try:
         jd = json.loads(json_text)
-        print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")  # du
+        #print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")  # du
     except Exception as e:
-        print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")  # du
+        #print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")  # du
         return {}
 
     # Otodom zwykle: props.pageProps.ad  (bywają też inne nazwy, dlatego kilka ścieżek)
@@ -78,17 +78,17 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     if not isinstance(ad, dict):
-        print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")  # du
+        #print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")  # du
         return out
-    print("--- DEBUG: Znaleziono obiekt 'ad' ---")  # du
+    #print("--- DEBUG: Znaleziono obiekt 'ad' ---")  # du
 
     # Czy to strona inwestycji/wielolokalowa?
     pp = _deepget(jd, ["props", "pageProps"]) or {}
     multi_units = bool(pp.get("paginatedUnits")) or bool(pp.get("developmentData"))
 
     # Tytuł, opis
-    out["title"] = ad.get("title") or ad.get("name") or ""
-    out["description"] = ad.get("description") or ""
+    #out["title"] = ad.get("title") or ad.get("name") or ""
+    #out["description"] = ad.get("description") or ""
 
     # --- CENY: z NEXT_DATA.topInformation ---
     tmp_price_amount: float | None = None
@@ -125,15 +125,15 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     # Lokalizacja (jak było)
     location_data = _deepget(ad, ["location"]) or {}
-    print(f"--- DEBUG: location_data: {location_data} ---")  # du
+    #print(f"--- DEBUG: location_data: {location_data} ---")  # du
     addr = location_data.get("address") or {}
-    print(f"--- DEBUG: addr: {addr} ---")  # du
+    #print(f"--- DEBUG: addr: {addr} ---")  # du
     city = _deepget(addr, ["city", "name"])
-    dist = _deepget(addr, ["district", "name"])
-    street = _deepget(addr, ["street", "name"])
+    #dist = _deepget(addr, ["district", "name"])
+    #street = _deepget(addr, ["street", "name"])
     out["city"] = city
-    out["district"] = dist
-    out["street"] = street
+    #out["district"] = dist
+    #out["street"] = street
 
     # Geo
     coords = location_data.get("coordinates") or {}
@@ -150,9 +150,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     rooms_val = _coerce_int(ad.get("rooms") or ad.get("roomsNumber") or ad.get("numberOfRooms"))
     if rooms_val is not None:
         out["rooms"] = rooms_val
-    out["floor"] = _coerce_int(ad.get("floor") or _deepget(ad, ["level", "value"]))
-    out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
-    out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
+    #out["floor"] = _coerce_int(ad.get("floor") or _deepget(ad, ["level", "value"]))
+    #out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
+    #out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
 
     # FINALIZACJA CEN po znaniu area_m2
     if tmp_price_per_m2 is not None:
@@ -165,28 +165,28 @@ def _parse_next_data(html: str) -> dict[str, Any]:
         out["price_currency"] = "PLN"
 
     # Typy rynku i nieruchomości
-    out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None
-    out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None
-    out["building_type"] = (ad.get("buildingType") or _deepget(ad, ["building", "type"]) or None)
+    #out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None
+    #out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None
+    #out["building_type"] = (ad.get("buildingType") or _deepget(ad, ["building", "type"]) or None)
 
     # Własność
-    out["ownership"] = ad.get("ownership") or _deepget(ad, ["legal", "ownership"])
+    #out["ownership"] = ad.get("ownership") or _deepget(ad, ["legal", "ownership"])
 
     # Agent / agencja / tel
-    contact = ad.get("contact") or {}
-    out["agent"] = contact.get("name") or contact.get("agentName")
-    out["agency"] = contact.get("agencyName") or _deepget(contact, ["agency", "name"])
-    out["phone"] = (contact.get("phone") or contact.get("phoneNumber") or "").strip() or None
+    #contact = ad.get("contact") or {}
+    #out["agent"] = contact.get("name") or contact.get("agentName")
+    #out["agency"] = contact.get("agencyName") or _deepget(contact, ["agency", "name"])
+    #out["phone"] = (contact.get("phone") or contact.get("phoneNumber") or "").strip() or None
 
     # Daty
-    out["posted_at"] = _iso_or_none(ad.get("createdAt") or ad.get("publicationDate"))
-    out["updated_at"] = _iso_or_none(ad.get("updatedAt") or ad.get("modificationDate"))
+    #out["posted_at"] = _iso_or_none(ad.get("createdAt") or ad.get("publicationDate"))
+    #out["updated_at"] = _iso_or_none(ad.get("updatedAt") or ad.get("modificationDate"))
 
     # Cechy
-    feats = ad.get("features") or ad.get("amenities")
-    print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")  # du
-    if isinstance(feats, list):
-        out["features"] = sorted([str(x).strip() for x in feats if x and str(x).strip()])
+    #feats = ad.get("features") or ad.get("amenities")
+    #print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")  # du
+    #if isinstance(feats, list):
+    #    out["features"] = sorted([str(x).strip() for x in feats if x and str(x).strip()])
     return out
 
 
@@ -263,33 +263,33 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
             # już istniejące odczyty zostaw; dodaj:
             if "numberOfRooms" in d and d["numberOfRooms"] is not None:
                 out["rooms"] = _coerce_int(_first(d["numberOfRooms"]))
-            if "floorLevel" in d:
-                out["floor"] = _coerce_int(_first(d["floorLevel"]))
-            if "numberOfFloors" in d:
-                out["max_floor"] = _coerce_int(_first(d["numberOfFloors"]))
-            if "yearBuilt" in d:
-                out["year_built"] = _coerce_int(_first(d["yearBuilt"]))
-            if "category" in d:
-                out["property_type"] = str(d["category"]).lower()
+            #if "floorLevel" in d:
+            #    out["floor"] = _coerce_int(_first(d["floorLevel"]))
+            #if "numberOfFloors" in d:
+            #    out["max_floor"] = _coerce_int(_first(d["numberOfFloors"]))
+            #if "yearBuilt" in d:
+            #    out["year_built"] = _coerce_int(_first(d["yearBuilt"]))
+            #if "category" in d:
+            #    out["property_type"] = str(d["category"]).lower()
             # Tytuł / opis
-            if "name" in d and not out.get("title"):
-                out["title"] = str(d["name"]).strip()
-            if "description" in d and not out.get("description"):
-                out["description"] = str(d["description"]).strip()
+            #if "name" in d and not out.get("title"):
+            #    out["title"] = str(d["name"]).strip()
+            #if "description" in d and not out.get("description"):
+            #    out["description"] = str(d["description"]).strip()
 
             # Adres i geo
             addr = d.get("address") or {}
             if isinstance(addr, dict):
                 out.setdefault("city", addr.get("addressLocality") or addr.get("addressRegion"))
-                out.setdefault("street", addr.get("streetAddress"))
+            #    out.setdefault("street", addr.get("streetAddress"))
             geo = d.get("geo") or {}
             if isinstance(geo, dict):
                 out["lat"] = _coerce_float(geo.get("latitude"))
                 out["lon"] = _coerce_float(geo.get("longitude"))
 
             # Daty
-            out.setdefault("posted_at", _iso_or_none(d.get("datePosted") or d.get("datePublished")))
-            out.setdefault("updated_at", _iso_or_none(d.get("dateModified")))
+            #out.setdefault("posted_at", _iso_or_none(d.get("datePosted") or d.get("datePublished")))
+            #out.setdefault("updated_at", _iso_or_none(d.get("dateModified")))
 
             # Zdjęcia z LD JSON (lista URL lub obiekty ImageObject)
             imgs = d.get("image") or d.get("photos") or []
@@ -342,6 +342,13 @@ def _parse_fallback_css(html: str) -> dict[str, Any]:
         out["price_amount"] = _coerce_float(m.group(1))
         out["price_currency"] = "PLN"
 
+    #cena za metr kwadratowy
+    ppm2_txt = select_text(s, '[aria-label="Cena za metr kwadratowy"]')
+    if ppm2_txt:
+        val = _coerce_float(ppm2_txt) # _coerce_float powinien wyciąć "10156"
+        if val:
+            out["price_per_m2"] = val
+
     # Lokalizacja: breadcrumb / nagłówek
     loc = (
         select_text(s, "[data-cy='adPageHeader-locality']") or
@@ -363,8 +370,8 @@ def _parse_fallback_css(html: str) -> dict[str, Any]:
         out["rooms"] = _coerce_int(m.group(1))
 
     # Ulica (opcjonalnie)
-    street = select_text(s, "[itemprop='streetAddress']") or select_text(s, "[data-testid='address-line']")
-    if street: out["street"] = street
+    #street = select_text(s, "[itemprop='streetAddress']") or select_text(s, "[data-testid='address-line']")
+    #if street: out["street"] = street
 
     return out
 
@@ -503,12 +510,10 @@ class OtodomAdapter(BaseAdapter):
         """Zapisuje rekordy ofert do offers.csv."""
         assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         header = [
-        "offer_id","source","url","title",
+        "offer_id","source","url",
         "price_amount","price_currency","price_per_m2",
-        "property_type","market_type","city","district","street","lat","lon",
-        "area_m2","rooms","floor","max_floor","year_built","building_type",
-        "ownership","agent","agency","phone","description","features","json_raw",
-        "posted_at","updated_at","first_seen","last_seen"
+        "city","lat","lon",
+        "area_m2","rooms"
         ]
         path = offers_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
