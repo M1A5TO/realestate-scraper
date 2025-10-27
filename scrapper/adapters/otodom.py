@@ -21,7 +21,7 @@ BASE = "https://www.otodom.pl"
 
 # heurystyka: linki do ofert mają segment /pl/oferta/
 OFFER_HREF_RE = re.compile(r"/pl/oferta/[^\"'#?]+")
-
+INVEST_HREF_RE = re.compile(r"/pl/inwestycja/[^\"'#?]+")
 # czasem ID pojawia się jako sufiks -ID<digits> lub ?unique_id=<digits>
 OFFER_ID_RE = re.compile(r"(?:-ID|[?&]unique_id=)([A-Za-z0-9]{4,})")
 
@@ -400,6 +400,7 @@ def _build_listing_url(city: str, deal: str, kind: str, page: int) -> str:
     )
     base = f"https://www.otodom.pl/pl/oferty/{deal}/{kind}/{city_slug}"
     return f"{base}?page={page}"
+
 def _extract_offer_links(html: str) -> list[str]:
     """Ostrożna ekstrakcja URL-i ofert z listingu. Fallback: każdy <a> dopasowany regexem."""
     s = soup(html)
@@ -407,10 +408,11 @@ def _extract_offer_links(html: str) -> list[str]:
     # 1) szybkie przejście po wszystkich <a>
     for a in s.select("a[href]"):
         h = a.get("href", "")
-        if OFFER_HREF_RE.search(h):
+        if OFFER_HREF_RE.search(h) or INVEST_HREF_RE.search(h):
             hrefs.append(h)
     # 2) także z surowego HTML dla pewności (shadow DOM / data-href itp.)
     hrefs += OFFER_HREF_RE.findall(html)
+    hrefs += INVEST_HREF_RE.findall(html)
     # normalizacja i dedupe lokalne
     out = []
     seen = set()
@@ -443,19 +445,141 @@ class OtodomAdapter(BaseAdapter):
         found_total = 0
         while page <= max_pages:
             url = _build_listing_url(city, deal, kind, page)
-            resp = self.http.get(url, accept="text/html")
-            links = _extract_offer_links(resp.text)
-            if not links and page > 1:
+            try:
+                resp = self.http.get(url, accept="text/html")
+                
+                # Zapisz HTML do pliku, aby go sprawdzić
+                with open(f"debug_strona_{page}.html", "w", encoding="utf-8") as f:
+                    f.write(resp.text)
+            
+                s = soup(resp.text)
+
+                all_cards = s.select(
+                    'a[data-cy="listing-item-link"],'
+                    'article[data-sentry-element="Container"]'
+                ) 
+                print(f"--- DEBUG: Strona {page}. Znalaziono {len(all_cards)} kart (article[...]). ---")#du
+            except Exception as e:
+                print(f"--- DEBUG: Błąd pobrania strony listingu {url}: {e}---") #du
+                break
+
+            if not all_cards and page > 1:
                 break  # brak wyników na kolejnej stronie → koniec
-            for ln in links:
+            
+            for card in all_cards:
+                
+                # ++++++++++ LOGIKA DLA DWÓCH TYPÓW KART ++++++++++
+                
+                card_text = card.get_text(separator=" ", strip=True)
+                
+                # 1. ZNAJDŹ FLAGĘ INWESTYCJI (Twój pomysł)
+                # Użyjemy unikalnej klasy 'evkld750' z banera (image_e5d7ba.png)
+                is_investment = card.select_one('aside[class*="evkld750"]') is not None
+                
+                # 2. ZNAJDŹ LINK (różnie dla obu typów kart)
+                href_tag = None
+                if card.name == 'a' and card.has_attr('data-cy'): # To jest karta Typu 1 (prosta)
+                    href_tag = card
+                else: # To jest karta Typu 2 (złożona)
+                    href_tag = card.select_one('a[data-cy="listing-item-link"]')
+
+                # 3. SPRAWDŹ, CZY MAMY LINK
+                if not href_tag or not href_tag.has_attr('href'):
+                    print(f"--- DEBUG: Karta znaleziona, ale brak tagu linku w środku. Typ karty: {card.name} ---")
+                    continue
+                    
+                href = href_tag.get('href')
+                ln = normalize_url(join_url(BASE, href))
+                
                 if ded.seen_url(ln):
                     continue
-                idx: OfferIndex = {"offer_url": ln, "page_idx": page}
-                oid = _maybe_offer_id(ln)
-                if oid:
-                    idx["offer_id"] = oid
-                found_total += 1
-                yield idx
+
+                # ++++++++++ NOWA GŁÓWNA LOGIKA FILTROWANIA ++++++++++
+                
+                # Przypadek 1: To JEST karta inwestycji (bo ma zielony baner)
+                if is_investment:
+                    if "Ukończona" in card_text:
+                        
+                        # ++++++++++ POCZĄTEK NOWEJ LOGIKI Z PAGINACJĄ v2 ++++++++++
+                        print(f"--- DEBUG: Wchodzę do Ukończonej Inwestycji (link: {ln}) ---")
+                        
+                        # Zbiór URL-i wszystkich podstron paginacji (np. ?page=1, ?page=2)
+                        investment_pages_to_scrape = {ln} # Zaczynamy od strony 1
+                        scraped_investment_pages = set()
+
+                        # 1. Pobierz stronę 1, aby znaleźć wszystkie inne strony
+                        try:
+                            print(f"--- DEBUG: ...pobieram stronę 1 lokali (szukam paginacji): {ln} ---")
+                            inv_resp = self.http.get(ln, accept="text/html")
+                            inv_html = inv_resp.text
+                            inv_soup = soup(inv_html)
+
+                            # ZNAJDŹ WSZYSTKIE LINKI DO STRON (np. 2, 3, 4)
+                            # Zgadywany selektor na podstawie image_f05422.png
+                            pagination_links = inv_soup.select(
+                                'nav[aria-label*="pagination"] a[href],'
+                                'a[data-cy*="pagination-link-page"]'
+                            )
+                            for page_link in pagination_links:
+                                if page_link.has_attr('href'):
+                                    page_url = normalize_url(join_url(BASE, page_link.get('href')))
+                                    investment_pages_to_scrape.add(page_url)
+                            
+                            print(f"--- DEBUG: ...znalazłem {len(investment_pages_to_scrape)} stron lokali do przetworzenia. ---")
+
+                        except Exception as e:
+                            print(f"--- DEBUG: Błąd pobierania strony 1 inwestycji {ln}: {e} ---")
+                            # Kontynuuj, przynajmniej spróbujemy przetworzyć stronę 1
+                        
+                        # 2. Przejdź pętlą po wszystkich znalezionych stronach (1, 2, 3...)
+                        for page_url in investment_pages_to_scrape:
+                            if page_url in scraped_investment_pages:
+                                continue
+                            
+                            try:
+                                # Jeśli to nie jest strona 1 (którą już mamy), pobierz ją
+                                if page_url != ln:
+                                    print(f"--- DEBUG: ...pobieram stronę lokali: {page_url} ---")
+                                    inv_resp = self.http.get(page_url, accept="text/html")
+                                    inv_html = inv_resp.text
+                                
+                                scraped_investment_pages.add(page_url)
+                                
+                                # 3. Wyciągnij linki do lokali z tej strony
+                                unit_links = _extract_offer_links(inv_html)
+                                if not unit_links:
+                                    print(f"--- DEBUG: ...brak linków do lokali na stronie {page_url} ---")
+
+                                for unit_ln in unit_links:
+                                    if "/pl/oferta/" not in unit_ln or ded.seen_url(unit_ln):
+                                        continue
+                                    
+                                    print(f"--- DEBUG: Yield pod-oferta z {page_url}: {unit_ln} ---")
+                                    idx: OfferIndex = {"offer_url": unit_ln, "page_idx": page}
+                                    oid = _maybe_offer_id(unit_ln)
+                                    if oid: idx["offer_id"] = oid
+                                    found_total += 1
+                                    yield idx
+                            
+                            except Exception as e:
+                                print(f"--- DEBUG: Błąd parsowania strony lokali {page_url}: {e} ---")
+                                pass # Pomiń tę jedną stronę paginacji
+                        # ++++++++++ KONIEC NOWEJ LOGIKI Z PAGINACJĄ v2 ++++++++++
+                    
+                    else:
+                        # To jest inwestycja, ale nieukończona (np. "W budowie"), pomiń
+                        print(f"--- DEBUG: Pomijam Inwestycję (nieukończona): {ln} ---")
+                        continue
+
+                # Przypadek 2: To jest zwykła oferta (bo nie ma zielonego banera)
+                else:
+                    if "/pl/oferta/" in href: 
+                        print(f"--- DEBUG: Yield Zwykła oferta: {ln} ---")
+                        idx: OfferIndex = {"offer_url": ln, "page_idx": page}
+                        oid = _maybe_offer_id(ln)
+                        if oid: idx["offer_id"] = oid
+                        found_total += 1
+                        yield idx
             page += 1
 
     # Zapis urls.csv jako osobna funkcja narzędziowa (wywoływana z pipelines/discover.py)
