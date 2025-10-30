@@ -7,9 +7,12 @@ from bs4 import BeautifulSoup
 from lxml import html as lxml_html
 
 
-def soup(html: str) -> BeautifulSoup:
-    """BS4 z parserem lxml – szybciej i stabilniej dla krzywego DOM."""
-    return BeautifulSoup(html, "lxml")
+def soup(html: str):
+    # Najpierw szybszy lxml – jeśli środowisko lub input robi fikołki, zrób twardy fallback.
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
 
 def select_text(node: BeautifulSoup, css: str, default: str = "") -> str:
     el = node.select_one(css)
