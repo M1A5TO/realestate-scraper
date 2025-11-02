@@ -31,7 +31,14 @@ def _read_urls(urls_csv: Path) -> list[str]:
                 out.append(u.strip())
     return out
 
-
+def _iso_or_same(x):
+    try:
+        from datetime import datetime
+        if isinstance(x, datetime):
+            return x.isoformat()
+    except Exception:
+        pass
+    return x
 
 def run_otodom_detail(
     *,
@@ -163,7 +170,11 @@ def run_morizon_detail(
 
                 missing = [k for k in REQ_FIELDS if data.get(k) in (None, "")]
                 if dump_debug and dbg:
-                    dbg.write(json.dumps({"url": u, "missing": missing, "data": data}, ensure_ascii=False) + "\n")
+                    dbg.write(json.dumps(
+                        {"url": u, "missing": missing,
+                        "data": {k: _iso_or_same(v) for k, v in data.items()}},
+                        ensure_ascii=False
+                    ) + "\n")
 
                 if not missing:
                     Offer(**data)                # walidacja
@@ -187,7 +198,11 @@ def run_morizon_detail(
                     pass
                 tb = traceback.format_exc()
                 if dump_debug and dbg:
-                    dbg.write(json.dumps({"url": u, "error": str(e), "traceback": tb}, ensure_ascii=False) + "\n")
+                    dbg.write(json.dumps(
+                        {"url": u, "missing": missing,
+                        "data": {k: _iso_or_same(v) for k, v in data.items()}},
+                        ensure_ascii=False
+                    ) + "\n")
                 log.warning("detail_parse_fail", extra={"extra": {"url": u, "err": type(e).__name__}})
 
             if len(batch) >= 50:

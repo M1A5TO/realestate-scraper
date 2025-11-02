@@ -14,7 +14,9 @@ from scrapper.core.parse import soup
 from scrapper.core.storage import append_rows_csv, offers_csv_path, photos_csv_path, urls_csv_path
 from scrapper.core.log import get_logger
 log = get_logger("scrapper.morizon")
-
+import hashlib
+import time
+from math import radians, sin, cos, asin, sqrt
 
 # ---------- Pomocnicze ----------
 
@@ -240,18 +242,49 @@ def _extract_latlon_from_any_json(html: str) -> tuple[Optional[float], Optional[
         pass
     return None, None
 
-def _city_district_street_from_url(url: str):
+def _city_district_street_from_url(url: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Parsuje {city, district, street} z URL Morizonu.
+    Obsługuje numerację ulic (np. -9-), wielowyrazowe nazwy oraz różne kolejności tokenów.
+    Przykład: /oferta/sprzedaz-mieszkanie-gdansk-stogi-skiby-9-61m2-mzn2046408664
+              -> ("Gdansk","Stogi","Skiby")
+    """
     u = normalize_url(url)
-    m = re.search(
-        r'/oferta/[a-z-]*-([a-ząćęłńóśźż\-]+)-([a-ząćęłńóśźż\-]+)-([a-ząćęłńóśźż\-]+)-\d+m2-',
-        u, re.I
-    )
+    m = re.search(r'/oferta/([a-z0-9\-\u0105\u0107\u0119\u0142\u0144\u00F3\u015B\u017A\u017C\u017A]+)', u, re.I)
     if not m:
         return None, None, None
-    def fix(s: str) -> str:
+    tail = m.group(1)
+
+    m2 = re.search(r'-(\d+)\s*m2-', tail, re.I)
+    if not m2:
+        return None, None, None
+    head = tail[:m2.start()]  # np. sprzedaz-mieszkanie-gdansk-stogi-skiby-9
+    toks = [t for t in head.split('-') if t]
+
+    pref = {"sprzedaz","wynajem","mieszkanie","mieszkania","dom","domy","dzialka","dzialki","lokal","lokale","nieruchomosci"}
+    i = 0
+    while i < len(toks) and toks[i] in pref:
+        i += 1
+    if i+1 >= len(toks):
+        return None, None, None
+
+    city_tok = toks[i]
+    district_tok = toks[i+1]
+    rest = toks[i+2:]
+
+    # Z końca usuń numery domów (np. 9, 9a)
+    while rest and re.fullmatch(r'\d+[a-zA-Z]?', rest[-1]):
+        rest.pop()
+    street_tok = rest[0] if rest else None
+
+    def fix(s: Optional[str]) -> Optional[str]:
+        if not s:
+            return None
         s = s.strip("-").replace("-", " ")
         return s[:1].upper() + s[1:]
-    return fix(m.group(1)), fix(m.group(2)), fix(m.group(3))
+
+    return fix(city_tok), fix(district_tok), fix(street_tok)
+
 
 def _extract_area_rooms_from_text(page_text: str) -> tuple[Optional[float], Optional[float]]:
     # PEWNY guard: jeśli brak tekstu – unikamy TypeError
@@ -295,7 +328,16 @@ def _extract_prices_from_text(txt: str) -> tuple[Optional[float], Optional[float
 
     return pa, ppm2
 
-
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Odległość wielkiego koła w metrach."""
+    if None in (lat1, lon1, lat2, lon2):
+        return float("inf")
+    R = 6371000.0
+    φ1, λ1, φ2, λ2 = map(radians, (lat1, lon1, lat2, lon2))
+    dφ = φ2 - φ1
+    dλ = λ2 - λ1
+    a = sin(dφ/2)**2 + cos(φ1)*cos(φ2)*sin(dλ/2)**2
+    return 2*R*asin(a**0.5)
 # ---------- Adapter ----------
 
 @dataclass
@@ -343,6 +385,88 @@ class MorizonAdapter(BaseAdapter):
         append_rows_csv(path, rows, header)
         return path
 
+    def _geo_cache_path(self) -> Path:
+        assert self.out_dir is not None
+        return self.out_dir / "geocache_osm.json"
+
+    def _geo_cache_load(self) -> dict[str, tuple[float, float]]:
+        p = self._geo_cache_path()
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _geo_cache_save(self, cache: dict[str, tuple[float, float]]) -> None:
+        p = self._geo_cache_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _geocode_osm(self, *, city: Optional[str], street: Optional[str]) -> tuple[Optional[float], Optional[float]]:
+        """
+        Fallback: Nominatim. Z cache na dysku. Limit 1 zapyt./sek (honorujemy RPS klienta).
+        """
+        q_parts = []
+        if street: q_parts.append(str(street))
+        if city:   q_parts.append(str(city))
+        q_parts.append("Polska")
+        q = ", ".join(q_parts).strip().lower()
+        if not q or self.http is None:
+            return None, None
+
+        cache = self._geo_cache_load()
+        if q in cache:
+            la, lo = cache[q]
+            return (float(la), float(lo)) if _is_plausible_pl(la, lo) else (None, None)
+
+        # Nominatim: GET /search?format=jsonv2&q=...
+        base = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "format": "jsonv2",
+            "q": q,
+            "addressdetails": 0,
+            "limit": 1,
+            # opcjonalnie zawęź do PL bbox (minimalizuje pomyłki):
+            "viewbox": f"{_PL_BBOX[2]},{_PL_BBOX[1]},{_PL_BBOX[3]},{_PL_BBOX[0]}",
+            "bounded": 1,
+        }
+        url = base + "?" + urllib.parse.urlencode(params)
+        try:
+            resp = self.http.get(url, accept="application/json")
+            data = resp.json()
+            if isinstance(data, list) and data:
+                la = _coerce_float(data[0].get("lat"))
+                lo = _coerce_float(data[0].get("lon"))
+                if _is_plausible_pl(la, lo):
+                    cache[q] = (la, lo)
+                    self._geo_cache_save(cache)
+                    return la, lo
+        except Exception:
+            pass
+        return None, None
+
+
+
+    def _snap_geo_if_far(self, data: dict, *, max_dist_m: float = 800.0) -> None:
+        """
+        Jeśli mamy city+street i geo z OSM różni się > max_dist_m, to podmień na OSM.
+        Nie robi nic, gdy OSM nie zwróciło punktu.
+        """
+        if not self.use_osm_geocode:
+            return
+        city = data.get("city")
+        street = data.get("street")
+        if not city or not street:
+            return
+        la, lo = data.get("lat"), data.get("lon")
+        la_osm, lo_osm = self._geocode_osm(city=city, street=street)
+        if _is_plausible_pl(la_osm, lo_osm):
+            if (not _is_plausible_pl(la, lo)) or (_haversine_m(la, lo, la_osm, lo_osm) > max_dist_m):
+                data["lat"], data["lon"] = la_osm, lo_osm
 
     # --- DETAIL ---
     def parse_offer(self, url: str) -> dict:
@@ -419,6 +543,7 @@ class MorizonAdapter(BaseAdapter):
         else:
             data.pop("lat", None); data.pop("lon", None)
 
+        self._snap_geo_if_far(data, max_dist_m=800.0)
         # 5) cena/m² i korekta metrażu
         if data.get("price_amount") and data.get("area_m2") and not data.get("price_per_m2"):
             try:
