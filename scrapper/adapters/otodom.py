@@ -762,69 +762,41 @@ class OtodomAdapter(BaseAdapter):
         
         return uniq
 
-    def download_and_write_photos(
+    def write_photo_links_csv(
         self,
         *,
         offer_id: str,
         offer_url: str,
         photo_list: list[PhotoMeta],
-        img_root: Path,
         limit: int | None = None,
     ) -> Path:
         """
-        Pobiera zdjęcia wg listy, zapisuje do katalogu {source}/{offer_id}/, 
-        tworzy wpisy w photos.csv.
+        Zapisuje TYLKO offer_id, seq i url do photos.csv.
         """
-        assert self.http is not None and self.out_dir is not None, "Deps not set."
+        assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         rows = []
         count = 0
+
         for ph in photo_list:
             if limit is not None and count >= limit:
                 break
+            
             seq = int(ph.get("seq", count))
             url = ph["url"]
-            try:
-                res = download_photo(self.http, url, img_root, self.source, offer_id, seq)
-                rows.append({
-                    "offer_id": offer_id,
-                    "source": self.source,
-                    "seq": seq,
-                    "url": url,
-                    "local_path": str(res.path),
-                    "width": ph.get("width"),
-                    "height": ph.get("height"),
-                    "bytes": res.bytes,
-                    "hash": res.sha256,
-                    "status": res.status,
-                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                })
-            except Exception:
-                rows.append({
-                    "offer_id": offer_id,
-                    "source": self.source,
-                    "seq": seq,
-                    "url": url,
-                    "local_path": "",
-                    "width": ph.get("width"),
-                    "height": ph.get("height"),
-                    "bytes": 0,
-                    "hash": "",
-                    "status": "failed",
-                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                })
+            
+            # Tworzymy wiersz zawierający TYLKO 3 wymagane pola
+            rows.append({
+                "offer_id": offer_id,
+                "seq": seq,
+                "url": url,
+            })
             count += 1
+
+        # Definiujemy minimalistyczny nagłówek pliku CSV
         header = [
             "offer_id",
-            "source",
             "seq",
             "url",
-            "local_path",
-            "width",
-            "height",
-            "bytes",
-            "hash",
-            "status",
-            "downloaded_at",
         ]
         path = photos_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
