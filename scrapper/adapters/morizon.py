@@ -11,7 +11,7 @@ from scrapper.adapters.base import BaseAdapter, OfferIndex, PhotoMeta
 from scrapper.core.dedup import DedupeSet, normalize_url
 from scrapper.core.http import HttpClient, join_url
 from scrapper.core.parse import soup
-from scrapper.core.storage import append_rows_csv, offers_csv_path, photos_csv_path, urls_csv_path
+from scrapper.core.storage import append_rows_csv, offers_csv_path, photos_csv_path, urls_csv_path, append_offer_row
 from scrapper.core.log import get_logger
 log = get_logger("scrapper.morizon")
 import hashlib
@@ -311,6 +311,12 @@ def _extract_area_rooms_from_text(page_text: str) -> tuple[Optional[float], Opti
         pass
     return area, rooms
 
+def _has_inquiry_price(bs) -> bool:
+    txt = " ".join([
+        (bs.select_one(".price-row_wrapper") or bs).get_text(" ", strip=True),
+        (bs.select_one("button") or bs).get_text(" ", strip=True),
+    ]).lower()
+    return "zapytaj o cen" in txt or "zapytaj o cenę" in txt
 
 def _extract_prices_from_text(txt: str) -> tuple[Optional[float], Optional[float]]:
     """Zwraca (price_amount, price_per_m2) jeśli znajdzie w tekście."""
@@ -368,14 +374,10 @@ class MorizonAdapter(BaseAdapter):
 
     def write_offers_csv(self, rows: list[dict]) -> Path:
         assert self.out_dir is not None
-        header = [
-            "offer_id","source","url","title",
-            "price_amount","price_currency","price_per_m2",
-            "area_m2","rooms","city","district","street",
-            "lat","lon","posted_at","updated_at"
-        ]
         path = offers_csv_path(self.out_dir)
-        append_rows_csv(path, rows, header)
+        # NIE ustawiamy lokalnego headera, NIE wołamy append_rows_csv
+        for r in rows or []:
+            append_offer_row(path, r)   # wymusza stałą kolejność kolumn i nagłówek
         return path
 
     def write_photos_csv(self, rows: list[PhotoMeta]) -> Path:
@@ -474,6 +476,7 @@ class MorizonAdapter(BaseAdapter):
         url = normalize_url(url)
         html = self.http.get(url, accept="text/html").text
         bs = soup(html)
+        inquiry = _has_inquiry_price(bs)
 
         data: dict[str, Any] = {
             "source": self.source,
@@ -507,13 +510,19 @@ class MorizonAdapter(BaseAdapter):
                 data["rooms"] = r2
 
         # 3b) Ceny (fallback z tekstu)
-        pa_fallback, ppm2_from_text = _extract_prices_from_text(page_text)
-        if data.get("price_amount") is None and pa_fallback is not None:
-            data["price_amount"] = pa_fallback
-        if data.get("price_amount") is not None and not data.get("price_currency"):
-            data["price_currency"] = "PLN"
-        if data.get("price_per_m2") is None and ppm2_from_text is not None:
-            data["price_per_m2"] = ppm2_from_text
+        if not inquiry:
+            pa_fallback, ppm2_from_text = _extract_prices_from_text(page_text)
+            if data.get("price_amount") is None and pa_fallback is not None:
+                data["price_amount"] = pa_fallback
+            if data.get("price_amount") is not None and not data.get("price_currency"):
+                data["price_currency"] = "PLN"
+            if data.get("price_per_m2") is None and ppm2_from_text is not None:
+                data["price_per_m2"] = ppm2_from_text
+        else:
+            # twarde wyzerowanie ceny całkowitej na stronach "Zapytaj o cenę"
+            data["price_amount"] = None
+            data["price_currency"] = None
+            data["price_per_m2"] = None
 
         # 4) GEO: DOM → JSON/JS → HYDRATED → OSM
         la, lo = data.get("lat"), data.get("lon")
@@ -544,8 +553,8 @@ class MorizonAdapter(BaseAdapter):
             data.pop("lat", None); data.pop("lon", None)
 
         self._snap_geo_if_far(data, max_dist_m=800.0)
-        # 5) cena/m² i korekta metrażu
-        if data.get("price_amount") and data.get("area_m2") and not data.get("price_per_m2"):
+        # 5) cena/m² i korekta metrażu – tylko jeśli NIE inquiry
+        if not inquiry and data.get("price_amount") and data.get("area_m2") and not data.get("price_per_m2"):
             try:
                 pa = float(data["price_amount"]); ar = float(data["area_m2"])
                 if ar > 0:
@@ -553,17 +562,19 @@ class MorizonAdapter(BaseAdapter):
             except Exception:
                 pass
 
-        try:
-            pa = float(data["price_amount"]) if data.get("price_amount") is not None else None
-            ppm2 = float(data["price_per_m2"]) if data.get("price_per_m2") is not None else None
-            ar = float(data["area_m2"]) if data.get("area_m2") is not None else None
-        except Exception:
-            pa = ppm2 = ar = None
+        # i sekcja korekty area z pa/ppm2:
+        if not inquiry:
+            try:
+                pa = float(data["price_amount"]) if data.get("price_amount") is not None else None
+                ppm2 = float(data["price_per_m2"]) if data.get("price_per_m2") is not None else None
+                ar = float(data["area_m2"]) if data.get("area_m2") is not None else None
+            except Exception:
+                pa = ppm2 = ar = None
 
-        if pa and ppm2 and ppm2 > 0:
-            ar_calc = pa / ppm2
-            if (ar is None) or (abs(ar - ar_calc) / ar_calc > 0.08):
-                data["area_m2"] = round(ar_calc, 2)
+            if pa and ppm2 and ppm2 > 0:
+                ar_calc = pa / ppm2
+                if (ar is None) or (abs(ar - ar_calc) / ar_calc > 0.08):
+                    data["area_m2"] = round(ar_calc, 2)
 
         return data
 
