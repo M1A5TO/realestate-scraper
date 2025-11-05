@@ -17,6 +17,8 @@ from scrapper.pipelines.detail import run_otodom_detail
 from scrapper.pipelines.discover import run_otodom_discover
 from scrapper.pipelines.photos import run_otodom_photos
 from scrapper.pipelines.run import run_otodom_full
+from scrapper.core.storage import urls_csv_path, offers_csv_path, photos_csv_path
+from scrapper.pipelines.photos import run_otodom_photos
 
 from scrapper.core.storage import append_rows_csv, urls_csv_path, offers_csv_path, photos_csv_path
 

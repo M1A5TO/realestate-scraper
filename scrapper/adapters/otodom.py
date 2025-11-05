@@ -427,6 +427,18 @@ def _maybe_offer_id(url: str) -> str | None:
     m = OFFER_ID_RE.search(url)
     return m.group(1) if m else None
 
+def _get_next_data_json(html: str) -> dict[str, Any]:
+    """Wyszukuje i parsuje __NEXT_DATA__ z HTML."""
+    bs = BeautifulSoup(html, "lxml")
+    script_tag = bs.find("script", {"id": "__NEXT_DATA__"})
+    if not script_tag or not script_tag.string:
+      return {}
+    try:
+        return json.loads(script_tag.string)
+    except Exception:
+        return {}
+
+
 @dataclass
 class OtodomAdapter(BaseAdapter):
     source: str = "otodom"
@@ -647,7 +659,7 @@ class OtodomAdapter(BaseAdapter):
     def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
         """
         Zwraca listę PhotoMeta: seq,url,(opcjonalnie width,height).
-        Preferuje listę z LD+JSON; fallback: atrybuty <img>, data-*.
+        Preferuje listę z __NEXT_DATA__; fallback: LD+JSON i <img>.
         """
         assert self.http is not None, "HttpClient not set. Call with_deps()."
         if html_or_url.startswith("http"):
@@ -656,31 +668,89 @@ class OtodomAdapter(BaseAdapter):
             html = html_or_url
 
         out: list[PhotoMeta] = []
-        # 1) LD+JSON zdjęcia
-        ld = _parse_ld_json_offer(html)
-        photos = ld.get("photos_from_json", []) if isinstance(ld, dict) else []
-        for i, u in enumerate(photos):
-            if isinstance(u, str):
-                out.append({"seq": i, "url": normalize_url(join_url(BASE, u))})
+        
+        # 1) Metoda główna: __NEXT_DATA__
+        # To jest źródło prawdy dla stron React/Next.js
+        try:
+            jd = _get_next_data_json(html)
+            # Znajdź główny obiekt 'ad'
+            ad = (
+                _deepget(jd, ["props", "pageProps", "ad"])
+                or _deepget(jd, ["props", "pageProps", "classified"])
+                or {}
+            )
+            
+            # Zbadaj 'ad' w poszukiwaniu 'images' lub 'gallery'
+            # Ścieżka "images" jest najczęstsza w Otodom
+            image_list = ad.get("images") or ad.get("gallery") or []
+            
+            if isinstance(image_list, list):
+                for i, img_data in enumerate(image_list):
+                    if not isinstance(img_data, dict):
+                        continue
+                    
+                    # Szukaj URL-i w popularnych kluczach, preferuj największe
+                    url = (
+                        img_data.get("large") 
+                        or img_data.get("url")
+                        or img_data.get("medium")
+                        or img_data.get("src")
+                    )
+                    
+                    if isinstance(url, str) and url.startswith("http"):
+                        meta: PhotoMeta = {"seq": i, "url": normalize_url(url)}
+                        # Spróbuj dodać wymiary, jeśli są dostępne
+                        w = _coerce_int(img_data.get("width"))
+                        h = _coerce_int(img_data.get("height"))
+                        if w: meta["width"] = w
+                        if h: meta["height"] = h
+                        out.append(meta)
+        except Exception as e:
+            print(f"--- DEBUG: Błąd parsowania __NEXT_DATA__ dla zdjęć: {e} ---")
+            out = [] # Wyczyść na wypadek błędu, aby przejść do fallbacks
 
-        # 2) Fallback: IMG w treści
+        # 2) Fallback: LD+JSON zdjęcia (Twoja stara metoda 1)
+        if not out:
+            ld = _parse_ld_json_offer(html)
+            photos = ld.get("photos_from_json", []) if isinstance(ld, dict) else []
+            for i, u in enumerate(photos):
+                if isinstance(u, str):
+                    out.append({"seq": i, "url": normalize_url(join_url(BASE, u))})
+
+        # 3) Fallback: IMG w treści (Twoja stara metoda 2, ale ulepszona)
         if not out:
             s = soup(html)
             seq = 0
-            for im in s.select(
-                "img[src], img[data-src], img[data-lazy], img[data-cy='gallery-image']"
-            ):                
-                u = im.get("src") or im.get("data-src") or im.get("data-lazy")
-                if not u: 
+            # Ulepszony selektor: szukaj obrazów wewnątrz głównej galerii
+            # To jest zgadywanie selektora, może wymagać poprawki
+            gallery_selectors = [
+                "[data-cy='ad-photos-gallery'] img",
+                "[data-testid='gallery-scroll'] img",
+                ".gallery img",
+                "img[data-cy='gallery-image']" # Twój stary selektor
+            ]
+            for im in s.select(", ".join(gallery_selectors)):                
+                # Preferuj 'data-src' lub 'src', ale unikaj base64 (placeholderów)
+                u = im.get("data-src") or im.get("src") or im.get("data-lazy")
+                if not u or u.startswith("data:image"): 
                     continue
-                u = normalize_url(join_url(BASE, u))
-                # prosta filtracja miniaturek
-                if "thumb" in u or "mini" in u:
+                
+                u_norm = normalize_url(join_url(BASE, u))
+                
+                # Filtracja miniaturek - Twoja logika była dobra
+                if "thumb" in u_norm or "mini" in u_norm or "1x1" in u_norm:
                     continue
-                out.append({"seq": seq, "url": u})
+                    
+                # Sprawdź, czy obraz nie jest zbyt mały (np. placeholder)
+                w = _coerce_int(im.get("width"))
+                h = _coerce_int(im.get("height"))
+                if (w is not None and w < 100) or (h is not None and h < 100):
+                    continue # Pomiń bardzo małe obrazki
+
+                out.append({"seq": seq, "url": u_norm})
                 seq += 1
 
-        # 3) Dedupe po URL
+        # 4) Dedupe po URL (Twoja logika była dobra)
         seen=set()
         uniq: list[PhotoMeta] = []
         for ph in out:
@@ -689,71 +759,44 @@ class OtodomAdapter(BaseAdapter):
                 continue
             seen.add(u)
             uniq.append(ph)
+        
         return uniq
 
-    def download_and_write_photos(
+    def write_photo_links_csv(
         self,
         *,
         offer_id: str,
         offer_url: str,
         photo_list: list[PhotoMeta],
-        img_root: Path,
         limit: int | None = None,
     ) -> Path:
         """
-        Pobiera zdjęcia wg listy, zapisuje do katalogu {source}/{offer_id}/, 
-        tworzy wpisy w photos.csv.
+        Zapisuje TYLKO offer_id, seq i url do photos.csv.
         """
-        assert self.http is not None and self.out_dir is not None, "Deps not set."
+        assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         rows = []
         count = 0
+
         for ph in photo_list:
             if limit is not None and count >= limit:
                 break
+            
             seq = int(ph.get("seq", count))
             url = ph["url"]
-            try:
-                res = download_photo(self.http, url, img_root, self.source, offer_id, seq)
-                rows.append({
-                    "offer_id": offer_id,
-                    "source": self.source,
-                    "seq": seq,
-                    "url": url,
-                    "local_path": str(res.path),
-                    "width": ph.get("width"),
-                    "height": ph.get("height"),
-                    "bytes": res.bytes,
-                    "hash": res.sha256,
-                    "status": res.status,
-                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                })
-            except Exception:
-                rows.append({
-                    "offer_id": offer_id,
-                    "source": self.source,
-                    "seq": seq,
-                    "url": url,
-                    "local_path": "",
-                    "width": ph.get("width"),
-                    "height": ph.get("height"),
-                    "bytes": 0,
-                    "hash": "",
-                    "status": "failed",
-                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                })
+            
+            # Tworzymy wiersz zawierający TYLKO 3 wymagane pola
+            rows.append({
+                "offer_id": offer_id,
+                "seq": seq,
+                "url": url,
+            })
             count += 1
+
+        # Definiujemy minimalistyczny nagłówek pliku CSV
         header = [
             "offer_id",
-            "source",
             "seq",
             "url",
-            "local_path",
-            "width",
-            "height",
-            "bytes",
-            "hash",
-            "status",
-            "downloaded_at",
         ]
         path = photos_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)

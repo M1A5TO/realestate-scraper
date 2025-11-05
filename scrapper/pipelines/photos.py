@@ -63,11 +63,10 @@ def run_otodom_photos(
                 )
                 continue
             try:
-                adapter.download_and_write_photos(
+                adapter.write_photo_links_csv(
                     offer_id=offer_id,
                     offer_url=url,
                     photo_list=plist,
-                    img_root=img_dir,
                     limit=limit_per_offer,
                 )
                 ok += len(plist) if limit_per_offer is None else min(
