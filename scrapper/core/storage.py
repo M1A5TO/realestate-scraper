@@ -6,6 +6,19 @@ import os
 import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Mapping, Any
+import csv
+
+
+OFFER_COLUMNS = [
+    "source", "offer_id", "url", "title",
+    "price_amount", "price_currency", "price_per_m2",
+    "city", "district", "street", "lat", "lon",
+    "area_m2", "rooms", "floor", "floors",
+    "market_type", "property_type",
+    "first_seen", "last_seen",
+]
+
 
 # ——————————————————————————————
 # Blokada pliku: cross-platform, bez zależności
@@ -96,3 +109,21 @@ def photo_path(
     ext: str = "jpg",
 ) -> Path:
     return photo_dir(img_root, source, offer_id) / f"{seq:03d}.{ext.lower()}"
+
+
+
+def append_offer_row(csv_path: Path, row: Mapping[str, Any]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    # Windows-friendly newlines
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=OFFER_COLUMNS,
+            extrasaction="ignore",    # odetnij pola spoza schematu
+        )
+        if write_header:
+            w.writeheader()
+        # wymuś wszystkie kolumny i ich kolejność
+        fixed = {k: row.get(k, "") for k in OFFER_COLUMNS}
+        w.writerow(fixed)

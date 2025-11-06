@@ -21,7 +21,7 @@ BASE = "https://www.otodom.pl"
 
 # heurystyka: linki do ofert mają segment /pl/oferta/
 OFFER_HREF_RE = re.compile(r"/pl/oferta/[^\"'#?]+")
-
+INVEST_HREF_RE = re.compile(r"/pl/inwestycja/[^\"'#?]+")
 # czasem ID pojawia się jako sufiks -ID<digits> lub ?unique_id=<digits>
 OFFER_ID_RE = re.compile(r"(?:-ID|[?&]unique_id=)([A-Za-z0-9]{4,})")
 
@@ -65,9 +65,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     try:
         jd = json.loads(json_text)
-        print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")  # du
+        #print("--- DEBUG: Poprawnie sparsowano JSON z __NEXT_DATA__ ---")  # du
     except Exception as e:
-        print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")  # du
+        #print(f"--- DEBUG: BŁĄD parsowania JSON: {e} ---")  # du
         return {}
 
     # Otodom zwykle: props.pageProps.ad  (bywają też inne nazwy, dlatego kilka ścieżek)
@@ -78,17 +78,17 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     )
     out: dict[str, Any] = {}
     if not isinstance(ad, dict):
-        print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")  # du
+        #print("--- DEBUG: Nie znaleziono obiektu 'ad' w oczekiwanej ścieżce ---")  # du
         return out
-    print("--- DEBUG: Znaleziono obiekt 'ad' ---")  # du
+    #print("--- DEBUG: Znaleziono obiekt 'ad' ---")  # du
 
     # Czy to strona inwestycji/wielolokalowa?
     pp = _deepget(jd, ["props", "pageProps"]) or {}
     multi_units = bool(pp.get("paginatedUnits")) or bool(pp.get("developmentData"))
 
     # Tytuł, opis
-    out["title"] = ad.get("title") or ad.get("name") or ""
-    out["description"] = ad.get("description") or ""
+    #out["title"] = ad.get("title") or ad.get("name") or ""
+    #out["description"] = ad.get("description") or ""
 
     # --- CENY: z NEXT_DATA.topInformation ---
     tmp_price_amount: float | None = None
@@ -125,15 +125,15 @@ def _parse_next_data(html: str) -> dict[str, Any]:
 
     # Lokalizacja (jak było)
     location_data = _deepget(ad, ["location"]) or {}
-    print(f"--- DEBUG: location_data: {location_data} ---")  # du
+    #print(f"--- DEBUG: location_data: {location_data} ---")  # du
     addr = location_data.get("address") or {}
-    print(f"--- DEBUG: addr: {addr} ---")  # du
+    #print(f"--- DEBUG: addr: {addr} ---")  # du
     city = _deepget(addr, ["city", "name"])
-    dist = _deepget(addr, ["district", "name"])
-    street = _deepget(addr, ["street", "name"])
+    #dist = _deepget(addr, ["district", "name"])
+    #street = _deepget(addr, ["street", "name"])
     out["city"] = city
-    out["district"] = dist
-    out["street"] = street
+    #out["district"] = dist
+    #out["street"] = street
 
     # Geo
     coords = location_data.get("coordinates") or {}
@@ -150,9 +150,9 @@ def _parse_next_data(html: str) -> dict[str, Any]:
     rooms_val = _coerce_int(ad.get("rooms") or ad.get("roomsNumber") or ad.get("numberOfRooms"))
     if rooms_val is not None:
         out["rooms"] = rooms_val
-    out["floor"] = _coerce_int(ad.get("floor") or _deepget(ad, ["level", "value"]))
-    out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
-    out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
+    #out["floor"] = _coerce_int(ad.get("floor") or _deepget(ad, ["level", "value"]))
+    #out["max_floor"] = _coerce_int(ad.get("totalFloors") or ad.get("buildingFloors"))
+    #out["year_built"] = _coerce_int(ad.get("buildYear") or ad.get("yearBuilt"))
 
     # FINALIZACJA CEN po znaniu area_m2
     if tmp_price_per_m2 is not None:
@@ -165,28 +165,28 @@ def _parse_next_data(html: str) -> dict[str, Any]:
         out["price_currency"] = "PLN"
 
     # Typy rynku i nieruchomości
-    out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None
-    out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None
-    out["building_type"] = (ad.get("buildingType") or _deepget(ad, ["building", "type"]) or None)
+    #out["market_type"] = (ad.get("marketType") or ad.get("market") or "").lower() or None
+    #out["property_type"] = (ad.get("estateType") or ad.get("propertyType") or "").lower() or None
+    #out["building_type"] = (ad.get("buildingType") or _deepget(ad, ["building", "type"]) or None)
 
     # Własność
-    out["ownership"] = ad.get("ownership") or _deepget(ad, ["legal", "ownership"])
+    #out["ownership"] = ad.get("ownership") or _deepget(ad, ["legal", "ownership"])
 
     # Agent / agencja / tel
-    contact = ad.get("contact") or {}
-    out["agent"] = contact.get("name") or contact.get("agentName")
-    out["agency"] = contact.get("agencyName") or _deepget(contact, ["agency", "name"])
-    out["phone"] = (contact.get("phone") or contact.get("phoneNumber") or "").strip() or None
+    #contact = ad.get("contact") or {}
+    #out["agent"] = contact.get("name") or contact.get("agentName")
+    #out["agency"] = contact.get("agencyName") or _deepget(contact, ["agency", "name"])
+    #out["phone"] = (contact.get("phone") or contact.get("phoneNumber") or "").strip() or None
 
     # Daty
-    out["posted_at"] = _iso_or_none(ad.get("createdAt") or ad.get("publicationDate"))
-    out["updated_at"] = _iso_or_none(ad.get("updatedAt") or ad.get("modificationDate"))
+    #out["posted_at"] = _iso_or_none(ad.get("createdAt") or ad.get("publicationDate"))
+    #out["updated_at"] = _iso_or_none(ad.get("updatedAt") or ad.get("modificationDate"))
 
     # Cechy
-    feats = ad.get("features") or ad.get("amenities")
-    print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")  # du
-    if isinstance(feats, list):
-        out["features"] = sorted([str(x).strip() for x in feats if x and str(x).strip()])
+    #feats = ad.get("features") or ad.get("amenities")
+    #print(f"--- DEBUG: Zwracany słownik (fragment): lat={out.get('lat')}, lon={out.get('lon')}, street={out.get('street')}")  # du
+    #if isinstance(feats, list):
+    #    out["features"] = sorted([str(x).strip() for x in feats if x and str(x).strip()])
     return out
 
 
@@ -263,33 +263,33 @@ def _parse_ld_json_offer(html: str) -> dict[str, Any]:
             # już istniejące odczyty zostaw; dodaj:
             if "numberOfRooms" in d and d["numberOfRooms"] is not None:
                 out["rooms"] = _coerce_int(_first(d["numberOfRooms"]))
-            if "floorLevel" in d:
-                out["floor"] = _coerce_int(_first(d["floorLevel"]))
-            if "numberOfFloors" in d:
-                out["max_floor"] = _coerce_int(_first(d["numberOfFloors"]))
-            if "yearBuilt" in d:
-                out["year_built"] = _coerce_int(_first(d["yearBuilt"]))
-            if "category" in d:
-                out["property_type"] = str(d["category"]).lower()
+            #if "floorLevel" in d:
+            #    out["floor"] = _coerce_int(_first(d["floorLevel"]))
+            #if "numberOfFloors" in d:
+            #    out["max_floor"] = _coerce_int(_first(d["numberOfFloors"]))
+            #if "yearBuilt" in d:
+            #    out["year_built"] = _coerce_int(_first(d["yearBuilt"]))
+            #if "category" in d:
+            #    out["property_type"] = str(d["category"]).lower()
             # Tytuł / opis
-            if "name" in d and not out.get("title"):
-                out["title"] = str(d["name"]).strip()
-            if "description" in d and not out.get("description"):
-                out["description"] = str(d["description"]).strip()
+            #if "name" in d and not out.get("title"):
+            #    out["title"] = str(d["name"]).strip()
+            #if "description" in d and not out.get("description"):
+            #    out["description"] = str(d["description"]).strip()
 
             # Adres i geo
             addr = d.get("address") or {}
             if isinstance(addr, dict):
                 out.setdefault("city", addr.get("addressLocality") or addr.get("addressRegion"))
-                out.setdefault("street", addr.get("streetAddress"))
+            #    out.setdefault("street", addr.get("streetAddress"))
             geo = d.get("geo") or {}
             if isinstance(geo, dict):
                 out["lat"] = _coerce_float(geo.get("latitude"))
                 out["lon"] = _coerce_float(geo.get("longitude"))
 
             # Daty
-            out.setdefault("posted_at", _iso_or_none(d.get("datePosted") or d.get("datePublished")))
-            out.setdefault("updated_at", _iso_or_none(d.get("dateModified")))
+            #out.setdefault("posted_at", _iso_or_none(d.get("datePosted") or d.get("datePublished")))
+            #out.setdefault("updated_at", _iso_or_none(d.get("dateModified")))
 
             # Zdjęcia z LD JSON (lista URL lub obiekty ImageObject)
             imgs = d.get("image") or d.get("photos") or []
@@ -342,6 +342,13 @@ def _parse_fallback_css(html: str) -> dict[str, Any]:
         out["price_amount"] = _coerce_float(m.group(1))
         out["price_currency"] = "PLN"
 
+    #cena za metr kwadratowy
+    ppm2_txt = select_text(s, '[aria-label="Cena za metr kwadratowy"]')
+    if ppm2_txt:
+        val = _coerce_float(ppm2_txt) # _coerce_float powinien wyciąć "10156"
+        if val:
+            out["price_per_m2"] = val
+
     # Lokalizacja: breadcrumb / nagłówek
     loc = (
         select_text(s, "[data-cy='adPageHeader-locality']") or
@@ -363,8 +370,8 @@ def _parse_fallback_css(html: str) -> dict[str, Any]:
         out["rooms"] = _coerce_int(m.group(1))
 
     # Ulica (opcjonalnie)
-    street = select_text(s, "[itemprop='streetAddress']") or select_text(s, "[data-testid='address-line']")
-    if street: out["street"] = street
+    #street = select_text(s, "[itemprop='streetAddress']") or select_text(s, "[data-testid='address-line']")
+    #if street: out["street"] = street
 
     return out
 
@@ -393,6 +400,7 @@ def _build_listing_url(city: str, deal: str, kind: str, page: int) -> str:
     )
     base = f"https://www.otodom.pl/pl/oferty/{deal}/{kind}/{city_slug}"
     return f"{base}?page={page}"
+
 def _extract_offer_links(html: str) -> list[str]:
     """Ostrożna ekstrakcja URL-i ofert z listingu. Fallback: każdy <a> dopasowany regexem."""
     s = soup(html)
@@ -400,10 +408,11 @@ def _extract_offer_links(html: str) -> list[str]:
     # 1) szybkie przejście po wszystkich <a>
     for a in s.select("a[href]"):
         h = a.get("href", "")
-        if OFFER_HREF_RE.search(h):
+        if OFFER_HREF_RE.search(h) or INVEST_HREF_RE.search(h):
             hrefs.append(h)
     # 2) także z surowego HTML dla pewności (shadow DOM / data-href itp.)
     hrefs += OFFER_HREF_RE.findall(html)
+    hrefs += INVEST_HREF_RE.findall(html)
     # normalizacja i dedupe lokalne
     out = []
     seen = set()
@@ -417,6 +426,18 @@ def _extract_offer_links(html: str) -> list[str]:
 def _maybe_offer_id(url: str) -> str | None:
     m = OFFER_ID_RE.search(url)
     return m.group(1) if m else None
+
+def _get_next_data_json(html: str) -> dict[str, Any]:
+    """Wyszukuje i parsuje __NEXT_DATA__ z HTML."""
+    bs = BeautifulSoup(html, "lxml")
+    script_tag = bs.find("script", {"id": "__NEXT_DATA__"})
+    if not script_tag or not script_tag.string:
+      return {}
+    try:
+        return json.loads(script_tag.string)
+    except Exception:
+        return {}
+
 
 @dataclass
 class OtodomAdapter(BaseAdapter):
@@ -436,19 +457,141 @@ class OtodomAdapter(BaseAdapter):
         found_total = 0
         while page <= max_pages:
             url = _build_listing_url(city, deal, kind, page)
-            resp = self.http.get(url, accept="text/html")
-            links = _extract_offer_links(resp.text)
-            if not links and page > 1:
+            try:
+                resp = self.http.get(url, accept="text/html")
+                
+                # Zapisz HTML do pliku, aby go sprawdzić
+                with open(f"debug_strona_{page}.html", "w", encoding="utf-8") as f:
+                    f.write(resp.text)
+            
+                s = soup(resp.text)
+
+                all_cards = s.select(
+                    'a[data-cy="listing-item-link"],'
+                    'article[data-sentry-element="Container"]'
+                ) 
+                print(f"--- DEBUG: Strona {page}. Znalaziono {len(all_cards)} kart (article[...]). ---")#du
+            except Exception as e:
+                print(f"--- DEBUG: Błąd pobrania strony listingu {url}: {e}---") #du
+                break
+
+            if not all_cards and page > 1:
                 break  # brak wyników na kolejnej stronie → koniec
-            for ln in links:
+            
+            for card in all_cards:
+                
+                # ++++++++++ LOGIKA DLA DWÓCH TYPÓW KART ++++++++++
+                
+                card_text = card.get_text(separator=" ", strip=True)
+                
+                # 1. ZNAJDŹ FLAGĘ INWESTYCJI (Twój pomysł)
+                # Użyjemy unikalnej klasy 'evkld750' z banera (image_e5d7ba.png)
+                is_investment = card.select_one('aside[class*="evkld750"]') is not None
+                
+                # 2. ZNAJDŹ LINK (różnie dla obu typów kart)
+                href_tag = None
+                if card.name == 'a' and card.has_attr('data-cy'): # To jest karta Typu 1 (prosta)
+                    href_tag = card
+                else: # To jest karta Typu 2 (złożona)
+                    href_tag = card.select_one('a[data-cy="listing-item-link"]')
+
+                # 3. SPRAWDŹ, CZY MAMY LINK
+                if not href_tag or not href_tag.has_attr('href'):
+                    print(f"--- DEBUG: Karta znaleziona, ale brak tagu linku w środku. Typ karty: {card.name} ---")
+                    continue
+                    
+                href = href_tag.get('href')
+                ln = normalize_url(join_url(BASE, href))
+                
                 if ded.seen_url(ln):
                     continue
-                idx: OfferIndex = {"offer_url": ln, "page_idx": page}
-                oid = _maybe_offer_id(ln)
-                if oid:
-                    idx["offer_id"] = oid
-                found_total += 1
-                yield idx
+
+                # ++++++++++ NOWA GŁÓWNA LOGIKA FILTROWANIA ++++++++++
+                
+                # Przypadek 1: To JEST karta inwestycji (bo ma zielony baner)
+                if is_investment:
+                    if "Ukończona" in card_text:
+                        
+                        # ++++++++++ POCZĄTEK NOWEJ LOGIKI Z PAGINACJĄ v2 ++++++++++
+                        print(f"--- DEBUG: Wchodzę do Ukończonej Inwestycji (link: {ln}) ---")
+                        
+                        # Zbiór URL-i wszystkich podstron paginacji (np. ?page=1, ?page=2)
+                        investment_pages_to_scrape = {ln} # Zaczynamy od strony 1
+                        scraped_investment_pages = set()
+
+                        # 1. Pobierz stronę 1, aby znaleźć wszystkie inne strony
+                        try:
+                            print(f"--- DEBUG: ...pobieram stronę 1 lokali (szukam paginacji): {ln} ---")
+                            inv_resp = self.http.get(ln, accept="text/html")
+                            inv_html = inv_resp.text
+                            inv_soup = soup(inv_html)
+
+                            # ZNAJDŹ WSZYSTKIE LINKI DO STRON (np. 2, 3, 4)
+                            # Zgadywany selektor na podstawie image_f05422.png
+                            pagination_links = inv_soup.select(
+                                'nav[aria-label*="pagination"] a[href],'
+                                'a[data-cy*="pagination-link-page"]'
+                            )
+                            for page_link in pagination_links:
+                                if page_link.has_attr('href'):
+                                    page_url = normalize_url(join_url(BASE, page_link.get('href')))
+                                    investment_pages_to_scrape.add(page_url)
+                            
+                            print(f"--- DEBUG: ...znalazłem {len(investment_pages_to_scrape)} stron lokali do przetworzenia. ---")
+
+                        except Exception as e:
+                            print(f"--- DEBUG: Błąd pobierania strony 1 inwestycji {ln}: {e} ---")
+                            # Kontynuuj, przynajmniej spróbujemy przetworzyć stronę 1
+                        
+                        # 2. Przejdź pętlą po wszystkich znalezionych stronach (1, 2, 3...)
+                        for page_url in investment_pages_to_scrape:
+                            if page_url in scraped_investment_pages:
+                                continue
+                            
+                            try:
+                                # Jeśli to nie jest strona 1 (którą już mamy), pobierz ją
+                                if page_url != ln:
+                                    print(f"--- DEBUG: ...pobieram stronę lokali: {page_url} ---")
+                                    inv_resp = self.http.get(page_url, accept="text/html")
+                                    inv_html = inv_resp.text
+                                
+                                scraped_investment_pages.add(page_url)
+                                
+                                # 3. Wyciągnij linki do lokali z tej strony
+                                unit_links = _extract_offer_links(inv_html)
+                                if not unit_links:
+                                    print(f"--- DEBUG: ...brak linków do lokali na stronie {page_url} ---")
+
+                                for unit_ln in unit_links:
+                                    if "/pl/oferta/" not in unit_ln or ded.seen_url(unit_ln):
+                                        continue
+                                    
+                                    print(f"--- DEBUG: Yield pod-oferta z {page_url}: {unit_ln} ---")
+                                    idx: OfferIndex = {"offer_url": unit_ln, "page_idx": page}
+                                    oid = _maybe_offer_id(unit_ln)
+                                    if oid: idx["offer_id"] = oid
+                                    found_total += 1
+                                    yield idx
+                            
+                            except Exception as e:
+                                print(f"--- DEBUG: Błąd parsowania strony lokali {page_url}: {e} ---")
+                                pass # Pomiń tę jedną stronę paginacji
+                        # ++++++++++ KONIEC NOWEJ LOGIKI Z PAGINACJĄ v2 ++++++++++
+                    
+                    else:
+                        # To jest inwestycja, ale nieukończona (np. "W budowie"), pomiń
+                        print(f"--- DEBUG: Pomijam Inwestycję (nieukończona): {ln} ---")
+                        continue
+
+                # Przypadek 2: To jest zwykła oferta (bo nie ma zielonego banera)
+                else:
+                    if "/pl/oferta/" in href: 
+                        print(f"--- DEBUG: Yield Zwykła oferta: {ln} ---")
+                        idx: OfferIndex = {"offer_url": ln, "page_idx": page}
+                        oid = _maybe_offer_id(ln)
+                        if oid: idx["offer_id"] = oid
+                        found_total += 1
+                        yield idx
             page += 1
 
     # Zapis urls.csv jako osobna funkcja narzędziowa (wywoływana z pipelines/discover.py)
@@ -503,12 +646,10 @@ class OtodomAdapter(BaseAdapter):
         """Zapisuje rekordy ofert do offers.csv."""
         assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         header = [
-        "offer_id","source","url","title",
+        "offer_id","source","url",
         "price_amount","price_currency","price_per_m2",
-        "property_type","market_type","city","district","street","lat","lon",
-        "area_m2","rooms","floor","max_floor","year_built","building_type",
-        "ownership","agent","agency","phone","description","features","json_raw",
-        "posted_at","updated_at","first_seen","last_seen"
+        "city","lat","lon",
+        "area_m2","rooms"
         ]
         path = offers_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
@@ -518,7 +659,7 @@ class OtodomAdapter(BaseAdapter):
     def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
         """
         Zwraca listę PhotoMeta: seq,url,(opcjonalnie width,height).
-        Preferuje listę z LD+JSON; fallback: atrybuty <img>, data-*.
+        Preferuje listę z __NEXT_DATA__; fallback: LD+JSON i <img>.
         """
         assert self.http is not None, "HttpClient not set. Call with_deps()."
         if html_or_url.startswith("http"):
@@ -527,31 +668,89 @@ class OtodomAdapter(BaseAdapter):
             html = html_or_url
 
         out: list[PhotoMeta] = []
-        # 1) LD+JSON zdjęcia
-        ld = _parse_ld_json_offer(html)
-        photos = ld.get("photos_from_json", []) if isinstance(ld, dict) else []
-        for i, u in enumerate(photos):
-            if isinstance(u, str):
-                out.append({"seq": i, "url": normalize_url(join_url(BASE, u))})
+        
+        # 1) Metoda główna: __NEXT_DATA__
+        # To jest źródło prawdy dla stron React/Next.js
+        try:
+            jd = _get_next_data_json(html)
+            # Znajdź główny obiekt 'ad'
+            ad = (
+                _deepget(jd, ["props", "pageProps", "ad"])
+                or _deepget(jd, ["props", "pageProps", "classified"])
+                or {}
+            )
+            
+            # Zbadaj 'ad' w poszukiwaniu 'images' lub 'gallery'
+            # Ścieżka "images" jest najczęstsza w Otodom
+            image_list = ad.get("images") or ad.get("gallery") or []
+            
+            if isinstance(image_list, list):
+                for i, img_data in enumerate(image_list):
+                    if not isinstance(img_data, dict):
+                        continue
+                    
+                    # Szukaj URL-i w popularnych kluczach, preferuj największe
+                    url = (
+                        img_data.get("large") 
+                        or img_data.get("url")
+                        or img_data.get("medium")
+                        or img_data.get("src")
+                    )
+                    
+                    if isinstance(url, str) and url.startswith("http"):
+                        meta: PhotoMeta = {"seq": i, "url": normalize_url(url)}
+                        # Spróbuj dodać wymiary, jeśli są dostępne
+                        w = _coerce_int(img_data.get("width"))
+                        h = _coerce_int(img_data.get("height"))
+                        if w: meta["width"] = w
+                        if h: meta["height"] = h
+                        out.append(meta)
+        except Exception as e:
+            print(f"--- DEBUG: Błąd parsowania __NEXT_DATA__ dla zdjęć: {e} ---")
+            out = [] # Wyczyść na wypadek błędu, aby przejść do fallbacks
 
-        # 2) Fallback: IMG w treści
+        # 2) Fallback: LD+JSON zdjęcia (Twoja stara metoda 1)
+        if not out:
+            ld = _parse_ld_json_offer(html)
+            photos = ld.get("photos_from_json", []) if isinstance(ld, dict) else []
+            for i, u in enumerate(photos):
+                if isinstance(u, str):
+                    out.append({"seq": i, "url": normalize_url(join_url(BASE, u))})
+
+        # 3) Fallback: IMG w treści (Twoja stara metoda 2, ale ulepszona)
         if not out:
             s = soup(html)
             seq = 0
-            for im in s.select(
-                "img[src], img[data-src], img[data-lazy], img[data-cy='gallery-image']"
-            ):                
-                u = im.get("src") or im.get("data-src") or im.get("data-lazy")
-                if not u: 
+            # Ulepszony selektor: szukaj obrazów wewnątrz głównej galerii
+            # To jest zgadywanie selektora, może wymagać poprawki
+            gallery_selectors = [
+                "[data-cy='ad-photos-gallery'] img",
+                "[data-testid='gallery-scroll'] img",
+                ".gallery img",
+                "img[data-cy='gallery-image']" # Twój stary selektor
+            ]
+            for im in s.select(", ".join(gallery_selectors)):                
+                # Preferuj 'data-src' lub 'src', ale unikaj base64 (placeholderów)
+                u = im.get("data-src") or im.get("src") or im.get("data-lazy")
+                if not u or u.startswith("data:image"): 
                     continue
-                u = normalize_url(join_url(BASE, u))
-                # prosta filtracja miniaturek
-                if "thumb" in u or "mini" in u:
+                
+                u_norm = normalize_url(join_url(BASE, u))
+                
+                # Filtracja miniaturek - Twoja logika była dobra
+                if "thumb" in u_norm or "mini" in u_norm or "1x1" in u_norm:
                     continue
-                out.append({"seq": seq, "url": u})
+                    
+                # Sprawdź, czy obraz nie jest zbyt mały (np. placeholder)
+                w = _coerce_int(im.get("width"))
+                h = _coerce_int(im.get("height"))
+                if (w is not None and w < 100) or (h is not None and h < 100):
+                    continue # Pomiń bardzo małe obrazki
+
+                out.append({"seq": seq, "url": u_norm})
                 seq += 1
 
-        # 3) Dedupe po URL
+        # 4) Dedupe po URL (Twoja logika była dobra)
         seen=set()
         uniq: list[PhotoMeta] = []
         for ph in out:
@@ -560,71 +759,44 @@ class OtodomAdapter(BaseAdapter):
                 continue
             seen.add(u)
             uniq.append(ph)
+        
         return uniq
 
-    def download_and_write_photos(
+    def write_photo_links_csv(
         self,
         *,
         offer_id: str,
         offer_url: str,
         photo_list: list[PhotoMeta],
-        img_root: Path,
         limit: int | None = None,
     ) -> Path:
         """
-        Pobiera zdjęcia wg listy, zapisuje do katalogu {source}/{offer_id}/, 
-        tworzy wpisy w photos.csv.
+        Zapisuje TYLKO offer_id, seq i url do photos.csv.
         """
-        assert self.http is not None and self.out_dir is not None, "Deps not set."
+        assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         rows = []
         count = 0
+
         for ph in photo_list:
             if limit is not None and count >= limit:
                 break
+            
             seq = int(ph.get("seq", count))
             url = ph["url"]
-            try:
-                res = download_photo(self.http, url, img_root, self.source, offer_id, seq)
-                rows.append({
-                    "offer_id": offer_id,
-                    "source": self.source,
-                    "seq": seq,
-                    "url": url,
-                    "local_path": str(res.path),
-                    "width": ph.get("width"),
-                    "height": ph.get("height"),
-                    "bytes": res.bytes,
-                    "hash": res.sha256,
-                    "status": res.status,
-                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                })
-            except Exception:
-                rows.append({
-                    "offer_id": offer_id,
-                    "source": self.source,
-                    "seq": seq,
-                    "url": url,
-                    "local_path": "",
-                    "width": ph.get("width"),
-                    "height": ph.get("height"),
-                    "bytes": 0,
-                    "hash": "",
-                    "status": "failed",
-                    "downloaded_at": datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                })
+            
+            # Tworzymy wiersz zawierający TYLKO 3 wymagane pola
+            rows.append({
+                "offer_id": offer_id,
+                "seq": seq,
+                "url": url,
+            })
             count += 1
+
+        # Definiujemy minimalistyczny nagłówek pliku CSV
         header = [
             "offer_id",
-            "source",
             "seq",
             "url",
-            "local_path",
-            "width",
-            "height",
-            "bytes",
-            "hash",
-            "status",
-            "downloaded_at",
         ]
         path = photos_csv_path(self.out_dir)
         append_rows_csv(path, rows, header)
