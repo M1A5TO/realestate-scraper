@@ -127,13 +127,13 @@ def run_morizon_photos(
                     extra={"extra":{"offer_id":offer_id,"err":type(e).__name__}})
                 continue
             try:
-                adapter.download_and_write_photos(
+                adapter.write_photo_links_csv(
                     offer_id=offer_id,
                     offer_url=url,
                     photo_list=plist,
-                    img_root=img_dir,
                     limit=limit_per_offer,
                 )
+
                 ok += len(plist) if limit_per_offer is None else min(len(plist), limit_per_offer)
             except Exception as e:
                 fail += 1
