@@ -6,6 +6,7 @@ from pathlib import Path
 
 from scrapper.adapters.otodom import OtodomAdapter
 from scrapper.adapters.morizon import MorizonAdapter
+from scrapper.adapters.gratka import GratkaAdapter
 
 from scrapper.core.http import HttpClient, build_proxies
 from scrapper.core.log import setup_json_logger
@@ -144,3 +145,55 @@ def run_morizon_photos(
         return {"photos_ok": ok, "photos_fail": fail}
     finally:
         http.close()
+
+def run_gratka_photos(
+    *,
+    offers_csv: Path,
+    out_dir: Path,
+    img_dir: Path | None,
+    user_agent: str,
+    timeout_s: float,
+    rps: float,
+    limit_per_offer: int | None,
+    http_proxy: str | None,
+    https_proxy: str | None,
+) -> dict:
+    log = setup_json_logger("scrapper")
+    rows = _read_offers(offers_csv)
+    if not rows:
+        log.info("photos_no_input", extra={"extra": {"source": "gratka", "offers_csv": str(offers_csv)}})
+        return {"offers": 0, "photos": 0, "fail": 0}
+
+    http = HttpClient(
+        user_agent=user_agent, timeout_s=timeout_s, rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    adapter = GratkaAdapter().with_deps(http=http, out_dir=out_dir)
+
+    offers = 0; photos = 0; fail = 0
+    for row in rows:
+        offer_id = row.get("offer_id") or ""
+        url = row.get("url") or row.get("offer_url") or ""
+        if not url:
+            continue
+        try:
+            plist = adapter.parse_photos(url)
+        except Exception as e:
+            fail += 1
+            log.warning("photos_list_fail", extra={"extra": {"source": "gratka", "offer_id": offer_id, "err": type(e).__name__}})
+            continue
+        try:
+            adapter.write_photo_links_csv(
+                offer_id=offer_id,
+                offer_url=url,
+                photo_list=plist,
+                limit=limit_per_offer,
+            )
+            offers += 1
+            photos += min(len(plist), limit_per_offer or len(plist))
+        except Exception as e:
+            fail += 1
+            log.warning("photos_write_fail", extra={"extra": {"source": "gratka", "offer_id": offer_id, "err": type(e).__name__}})
+
+    log.info("photos_done", extra={"extra": {"source": "gratka", "offers": offers, "photos": photos, "fail": fail}})
+    return {"offers": offers, "photos": photos, "fail": fail}

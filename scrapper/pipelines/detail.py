@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from scrapper.adapters.otodom import OtodomAdapter
 from scrapper.adapters.morizon import MorizonAdapter
+from scrapper.adapters.gratka import GratkaAdapter
 
 from scrapper.core.http import HttpClient, build_proxies
 from scrapper.core.log import setup_json_logger, get_logger
@@ -220,3 +221,88 @@ def run_morizon_detail(
         if dbg:
             dbg.close()
 
+def run_gratka_detail(
+    *,
+    urls_csv: Path,
+    out_dir: Path,
+    user_agent: str,
+    timeout_s: float,
+    rps: float,
+    http_proxy: str | None,
+    https_proxy: str | None,
+    allow_incomplete: bool = False,
+    dump_debug: bool = True,
+) -> dict:
+    log = setup_json_logger("scrapper")
+    # wczytaj URL-e
+    def _read_urls(csv_path: Path) -> list[str]:
+        if not csv_path.exists():
+            return []
+        out: list[str] = []
+        with csv_path.open("r", newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                u = row.get("offer_url")
+                if u:
+                    out.append(u)
+        return out
+
+    urls = _read_urls(urls_csv)
+    if not urls:
+        log.info("detail_no_input", extra={"extra": {"source": "gratka", "urls_csv": str(urls_csv)}})
+        return {"offers_ok": 0, "offers_fail": 0}
+
+    http = HttpClient(
+        user_agent=user_agent, timeout_s=timeout_s, rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    adapter = GratkaAdapter().with_deps(http=http, out_dir=out_dir, use_osm_geocode=True)
+    ok = 0
+    fail = 0
+    batch: list[dict] = []
+
+    for u in urls:
+        try:
+            d = adapter.parse_offer(u)
+            d.setdefault("source", "gratka")
+            # twarda walidacja jak w morizon/otodom
+            missing = [k for k in REQ_FIELDS if d.get(k) in (None, "")]
+            if missing:
+                fail += 1
+                if dump_debug:
+                    log.warning("detail_incomplete_skip", extra={"extra": {"source":"gratka","url":u,"missing":missing}})
+                continue
+            Offer(**d)
+            batch.append(d)
+            ok += 1
+        except ValidationError as e:
+            fail += 1
+            if dump_debug:
+                log.warning("detail_validate_fail", extra={"extra":{"source":"gratka","url":u,"err":"ValidationError","fields":list(e.errors())}})
+        except Exception as e:
+            fail += 1
+            if dump_debug:
+                log.warning("detail_parse_fail", extra={"extra":{"source":"gratka","url":u,"err":type(e).__name__}})
+
+        if len(batch) >= 50:
+            out_csv = offers_csv_path(out_dir)
+            from scrapper.core.storage import append_offer_row
+            for row in batch:
+                # usuwamy ewentualne klucze spoza schematu
+                row.pop("first_seen", None)
+                row.pop("last_seen", None)
+                append_offer_row(out_csv, row)
+            batch.clear()
+
+    # flush końcowy
+    if batch:
+        out_csv = offers_csv_path(out_dir)
+        from scrapper.core.storage import append_offer_row
+        for row in batch:
+            row.pop("first_seen", None)
+            row.pop("last_seen", None)
+            append_offer_row(out_csv, row)
+
+
+
+    log.info("detail_done", extra={"extra": {"source": "gratka", "ok": ok, "fail": fail}})
+    return {"offers_ok": ok, "offers_fail": fail}
