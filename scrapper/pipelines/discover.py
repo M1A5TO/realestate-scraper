@@ -102,3 +102,45 @@ def run_gratka_discover(
     except Exception as e:
         log.warning("discover_fail", extra={"extra": {"source": "gratka", "err": type(e).__name__}})
         return {"pages": 0, "urls_csv": 0}
+    
+    # --- TROJMIASTO ---
+
+def run_trojmiasto_discover(
+    *,
+    city: str,
+    deal: str,
+    kind: str,
+    max_pages: int,
+    out_dir: Path,
+    user_agent: str,
+    timeout_s: float,
+    rps: float,
+    http_proxy: str | None,
+    https_proxy: str | None,
+) -> dict:
+    # Tworzymy logger i http klienta (tak jak w run_morizon_discover)
+    log = setup_json_logger("scrapper")
+    http = HttpClient(
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    
+    # Import adaptera wewnątrz funkcji, aby uniknąć problemów z zależnościami
+    from scrapper.adapters.trojmiasto import TrojmiastoAdapter
+    
+    try:
+        adapter = TrojmiastoAdapter().with_deps(http=http, out_dir=out_dir)
+        
+        # Krok 1: Odkryj oferty
+        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
+        
+        # Krok 2: Zapisz URL-e
+        path = adapter.write_urls_csv(rows)
+        
+        stats = {"pages": max_pages, "urls_csv": int(urls_csv_path(out_dir).exists())}
+        log.info("discover_done", extra={"extra": {"source": "trojmiasto", "path": str(path)}})
+        return stats
+    finally:
+        http.close()

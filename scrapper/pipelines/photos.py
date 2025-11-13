@@ -197,3 +197,66 @@ def run_gratka_photos(
 
     log.info("photos_done", extra={"extra": {"source": "gratka", "offers": offers, "photos": photos, "fail": fail}})
     return {"offers": offers, "photos": photos, "fail": fail}
+
+# --- TROJMIASTO ---
+
+def run_trojmiasto_photos(
+    *,
+    offers_csv: Path,
+    out_dir: Path,
+    img_dir: Path | None,  # Ignorowane, adapter zapisuje tylko linki
+    user_agent: str,
+    timeout_s: float,
+    rps: float,
+    limit_per_offer: int | None = None,
+    http_proxy: str | None = None,
+    https_proxy: str | None = None,
+) -> dict[str, int]:
+    
+    # Import adaptera wewnątrz funkcji
+    from scrapper.adapters.trojmiasto import TrojmiastoAdapter
+    
+    log = setup_json_logger("scrapper")
+    rows = _read_offers(offers_csv)
+    if not rows:
+        log.info("photos_no_input", extra={"extra": {"source": "trojmiasto", "offers_csv": str(offers_csv)}})
+        return {"offers": 0, "photos": 0, "fail": 0}
+
+    http = HttpClient(
+        user_agent=user_agent, timeout_s=timeout_s, rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    adapter = TrojmiastoAdapter().with_deps(http=http, out_dir=out_dir)
+
+    offers = 0; photos = 0; fail = 0
+    for row in rows:
+        offer_id = row.get("offer_id") or ""
+        url = row.get("url") or row.get("offer_url") or ""
+        if not url or row.get("source") != "trojmiasto": # Przetwarzaj tylko oferty trojmiasto
+            continue
+        try:
+            # Krok 1: Parsuj zdjęcia
+            # Adapter Trojmiasto.pl pobiera zdjęcia z URL-a oferty (bo są w ld+json)
+            plist = adapter.parse_photos(url)
+        except Exception as e:
+            fail += 1
+            log.warning("photos_list_fail", extra={"extra": {"source": "trojmiasto", "offer_id": offer_id, "err": type(e).__name__}})
+            continue
+        
+        try:
+            # Krok 2: Zapisz linki do zdjęć
+            adapter.write_photo_links_csv(
+                offer_id=offer_id,
+                offer_url=url,
+                photo_list=plist,
+                limit=limit_per_offer,
+            )
+            offers += 1
+            photos += min(len(plist), limit_per_offer or len(plist))
+        except Exception as e:
+            fail += 1
+            log.warning("photos_save_fail", extra={"extra": {"source": "trojmiasto", "offer_id": offer_id, "err": type(e).__name__}})
+    
+    http.close()
+    log.info("photos_done", extra={"extra": {"source": "trojmiasto", "offers": offers, "photos": photos, "fail": fail}})
+    return {"offers": offers, "photos": photos, "fail": fail}

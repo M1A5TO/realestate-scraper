@@ -306,3 +306,112 @@ def run_gratka_detail(
 
     log.info("detail_done", extra={"extra": {"source": "gratka", "ok": ok, "fail": fail}})
     return {"offers_ok": ok, "offers_fail": fail}
+
+# --- TROJMIASTO ---
+
+def run_trojmiasto_detail(
+    *,
+    urls_csv: Path,
+    out_dir: Path,
+    user_agent: str,
+    timeout_s: float,
+    rps: float,
+    http_proxy: str | None,
+    https_proxy: str | None,
+    allow_incomplete: bool = False,
+    dump_debug: bool = True,
+) -> dict:
+    
+    # Import adaptera wewnątrz funkcji
+    from scrapper.adapters.trojmiasto import TrojmiastoAdapter
+
+    log = setup_json_logger("scrapper")
+    http = HttpClient(
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+
+    urls = _read_urls(urls_csv)
+    if not urls:
+        log.warning("detail_no_urls", extra={"extra": {"source": "trojmiasto", "urls_csv": str(urls_csv)}})
+        return {"offers_ok": 0, "offers_fail": 0}
+
+    ok = 0
+    fail = 0
+    batch: list[dict] = []
+
+    adapter = TrojmiastoAdapter().with_deps(http=http, out_dir=out_dir)
+
+    now = datetime.utcnow()
+    # Ścieżka do pliku debug
+    dbg_path = out_dir / "offers_debug.jsonl"
+    dbg = dbg_path.open("a", encoding="utf-8") if dump_debug else None
+    
+    try:
+        for u in urls:
+            try:
+                # Krok 1: Parsuj ofertę
+                d = adapter.parse_offer(u)
+                if not d:
+                    raise Exception("Adapter returned empty data")
+                
+                d["first_seen"] = now
+                d["last_seen"] = now
+
+                # Krok 2: Walidacja
+                missing = [k for k in REQ_FIELDS if d.get(k) in (None, "")]
+                
+                if dump_debug and dbg:
+                    # Zapisz log debugowania (logika z run_gratka_detail)
+                    dbg.write(json.dumps(
+                        {"url": u, "missing": missing,
+                         "data": {k: _iso_or_same(v) for k, v in d.items()}},
+                        ensure_ascii=False
+                    ) + "\n")
+
+                if missing and not allow_incomplete:
+                    fail += 1
+                    log.warning("detail_incomplete_skip", extra={"extra": {"source": "trojmiasto", "url": u, "missing": missing}})
+                    continue
+                
+                # Walidacja Pydantic
+                Offer(**d)
+                batch.append(d)
+                ok += 1
+            
+            except ValidationError as e:
+                fail += 1
+                if dump_debug:
+                    log.warning("detail_validate_fail", extra={"extra": {"source": "trojmiasto", "url": u, "err": "ValidationError", "fields": list(e.errors())}})
+            except Exception as e:
+                fail += 1
+                if dump_debug:
+                    log.warning("detail_parse_fail", extra={"extra": {"source": "trojmiasto", "url": u, "err": type(e).__name__}})
+
+            # Krok 3: Zapis wsadowy (logika z run_gratka_detail)
+            if len(batch) >= 50:
+                out_csv = offers_csv_path(out_dir)
+                for row in batch:
+                    row.pop("first_seen", None)
+                    row.pop("last_seen", None)
+                    append_offer_row(out_csv, row)
+                batch.clear()
+
+        # Krok 4: Zapisz resztę z batcha
+        if batch:
+            out_csv = offers_csv_path(out_dir)
+            for row in batch:
+                row.pop("first_seen", None)
+                row.pop("last_seen", None)
+                append_offer_row(out_csv, row)
+            batch.clear()
+
+        log.info("detail_done", extra={"extra": {"source": "trojmiasto", "ok": ok, "fail": fail, "out": str(offers_csv_path(out_dir))}})
+        return {"offers_ok": ok, "offers_fail": fail}
+    
+    finally:
+        http.close()
+        if dbg:
+            dbg.close()

@@ -8,10 +8,10 @@ import typer
 from scrapper.config import load_settings
 
 # Pipelines
-from scrapper.pipelines.discover import run_otodom_discover, run_morizon_discover, run_gratka_discover
-from scrapper.pipelines.detail import run_otodom_detail, run_morizon_detail, run_gratka_detail
-from scrapper.pipelines.photos import run_otodom_photos, run_morizon_photos, run_gratka_photos
-from scrapper.pipelines.run import run_otodom_full, run_morizon_full, run_gratka_full
+from scrapper.pipelines.discover import run_otodom_discover, run_morizon_discover, run_gratka_discover, run_trojmiasto_discover
+from scrapper.pipelines.detail import run_otodom_detail, run_morizon_detail, run_gratka_detail, run_trojmiasto_detail
+from scrapper.pipelines.photos import run_otodom_photos, run_morizon_photos, run_gratka_photos, run_trojmiasto_photos
+from scrapper.pipelines.run import run_otodom_full, run_morizon_full, run_gratka_full, run_trojmiasto_full
 
 # I/O helpers tylko do ścieżek
 from scrapper.core.storage import urls_csv_path, offers_csv_path, photos_csv_path
@@ -25,10 +25,12 @@ app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=N
 otodom = typer.Typer(help="Operacje dla źródła: Otodom", rich_markup_mode=None)
 morizon = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 gratka = typer.Typer(help="Scraper Gratka")
+trojmiasto = typer.Typer(help="Scraper Trojmiasto.pl", rich_markup_mode=None)
 
 app.add_typer(otodom, name="otodom")
 app.add_typer(morizon, name="morizon")
 app.add_typer(gratka, name="gratka")
+app.add_typer(trojmiasto, name="trojmiasto")
 
 # ---------------- OTODOM ----------------
 
@@ -315,6 +317,8 @@ def morizon_full_cmd(
     )
     typer.echo(st)
 
+# ---------------- GRATKA ----------------
+
 @gratka.command("discover")
 def gratka_discover_cmd(
     city: Optional[str] = typer.Option(None, "--city", "-c", help="Miasto"),
@@ -439,6 +443,131 @@ def gratka_full_cmd(
     )
     typer.echo(json.dumps(st, ensure_ascii=False))
 
+# ---------------- TROJMIASTO ----------------
+
+@trojmiasto.command("discover")
+def trojmiasto_discover_cmd(
+    city: Optional[str] = typer.Option(None, "--city", "-c", help="Miasto (ignorowane, Trojmiasto.pl domyślnie scrapuje Trójmiasto)"),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d", help="sprzedaz|wynajem"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k", help="mieszkanie|dom|dzialka|lokal"),
+    max_pages: int = typer.Option(1, "--max-pages", "-p", min=1, show_default=True),
+) -> None:
+    cfg = load_settings()
+    st = run_trojmiasto_discover(
+        city=city or cfg.defaults.city, # Przekazujemy, choć adapter może ignorować
+        deal=deal or cfg.defaults.deal,
+        kind=kind or cfg.defaults.kind,
+        max_pages=max_pages,
+        out_dir=Path(cfg.io.out_dir),
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
+    typer.echo(json.dumps(st, ensure_ascii=False))
+
+@trojmiasto.command("detail")
+def trojmiasto_detail_cmd(
+    in_urls: str = typer.Option("data/out/urls.csv", "--in-urls", "-i", help="Ścieżka do CSV z URL-ami"),
+    no_debug: bool = typer.Option(False, "--no-debug", help="Nie zapisuj plików debug"),
+) -> None:
+    cfg = load_settings()
+    st = run_trojmiasto_detail(
+        urls_csv=Path(in_urls),
+        out_dir=Path(cfg.io.out_dir),
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+        allow_incomplete=False,   # Wymuszamy kompletne dane
+        dump_debug=not no_debug,
+    )
+    typer.echo(json.dumps(st, ensure_ascii=False))
+
+@trojmiasto.command("photos")
+def trojmiasto_photos_cmd(
+    in_offers: str = typer.Option("data/out/offers.csv", "--in-offers", "-i", help="Ścieżka do CSV z ofertami"),
+    limit_photos: Optional[int] = typer.Option(None, "--limit-photos", "-l", help="Limit zdjęć na ofertę"),
+) -> None:
+    cfg = load_settings()
+    st = run_trojmiasto_photos(
+        offers_csv=Path(in_offers),
+        out_dir=Path(cfg.io.out_dir),
+        img_dir=Path(cfg.io.img_dir) if getattr(cfg.io, "img_dir", None) else None,
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        limit_per_offer=limit_photos,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
+    typer.echo(json.dumps(st, ensure_ascii=False))
+
+@trojmiasto.command("full")
+def trojmiasto_full_cmd(
+    city: Optional[str] = typer.Option(None, "--city", "-c", help="Miasto (ignorowane)"),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d", help="sprzedaz|wynajem"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k", help="mieszkanie|dom|dzialka|lokal"),
+    max_pages: int = typer.Option(1, "--max-pages", "-p", min=1, show_default=True),
+    limit_photos: Optional[int] = typer.Option(None, "--limit-photos", "-l", help="Limit zdjęć na ofertę"),
+    no_photos: bool = typer.Option(False, "--no-photos", help="Pomiń etap zdjęć"),
+) -> None:
+    cfg = load_settings()
+    if no_photos:
+        # discover -> detail
+        run_trojmiasto_discover(
+            city=city or cfg.defaults.city,
+            deal=deal or cfg.defaults.deal,
+            kind=kind or cfg.defaults.kind,
+            max_pages=max_pages,
+            out_dir=Path(cfg.io.out_dir),
+            user_agent=cfg.http.user_agent,
+            timeout_s=cfg.http.timeout_s,
+            rps=cfg.http.rate_limit_rps,
+            http_proxy=cfg.http.http_proxy,
+            https_proxy=cfg.http.https_proxy,
+        )
+        st_detail = run_trojmiasto_detail(
+            urls_csv=urls_csv_path(Path(cfg.io.out_dir)),
+            out_dir=Path(cfg.io.out_dir),
+            user_agent=cfg.http.user_agent,
+            timeout_s=cfg.http.timeout_s,
+            rps=cfg.http.rate_limit_rps,
+            http_proxy=cfg.http.http_proxy,
+            https_proxy=cfg.http.https_proxy,
+            allow_incomplete=False,
+            dump_debug=True,
+        )
+        stats = {
+            "discover_pages": max_pages,
+            "offers_ok": st_detail.get("offers_ok", 0),
+            "offers_fail": st_detail.get("offers_fail", 0),
+            "photos_ok": 0,
+            "photos_fail": 0,
+            "urls_csv": int(urls_csv_path(Path(cfg.io.out_dir)).exists()),
+            "offers_csv": int(offers_csv_path(Path(cfg.io.out_dir)).exists()),
+            "photos_csv": 0,
+        }
+        typer.echo(json.dumps(stats, ensure_ascii=False))
+        return
+
+    st = run_trojmiasto_full(
+        city=city or cfg.defaults.city,
+        deal=deal or cfg.defaults.deal,
+        kind=kind or cfg.defaults.kind,
+        max_pages=max_pages,
+        out_dir=Path(cfg.io.out_dir),
+        img_dir=Path(cfg.io.img_dir) if getattr(cfg.io, "img_dir", None) else None,
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        limit_photos=limit_photos,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
+    typer.echo(json.dumps(st, ensure_ascii=False))
 
 if __name__ == "__main__":
     app()
