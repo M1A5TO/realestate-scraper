@@ -153,6 +153,25 @@ def _parse_classic_html(html: str, data: dict[str, Any]) -> None:
         if data.get("price_amount") and data.get("area_m2") and data["area_m2"] > 0:
             data["price_per_m2"] = round(data["price_amount"] / data["area_m2"], 2)
 
+def _parse_classic_photos(html: str) -> list[str]:
+    """Fallback: Pobiera zdjęcia z linków galerii w 'klasycznym' HTML."""
+    bs = soup(html)
+    urls = []
+    
+    for link in bs.select('a[data-lightbox-target="photo"]'):
+        href = link.get('href')
+        if href:
+            urls.append(href)
+    
+    if not urls:
+        for img in bs.select('div.xogGallery img.lazy[data-src]'):
+            src = img.get('data-src')
+            if src:
+                urls.append(src)
+    
+    seen = set()
+    unique_urls = [u for u in urls if u and u not in seen and (seen.add(u) or True)]
+    return unique_urls
 
 @dataclass
 class TrojmiastoAdapter(BaseAdapter):
@@ -296,7 +315,7 @@ class TrojmiastoAdapter(BaseAdapter):
     # --- Pozostałe metody (photos i write_*) ---
 
     def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
-        """Pobiera linki do zdjęć z __NEXT_DATA__."""
+        """Pobiera linki do zdjęć (hybrydowo: __NEXT_DATA__ lub klasyczny HTML)."""
         assert self.http is not None
         
         if html_or_url.startswith("http"):
@@ -309,40 +328,40 @@ class TrojmiastoAdapter(BaseAdapter):
         else:
             html = html_or_url
 
-        next_data = _parse_next_data(html)
-        if not next_data:
-            # TODO: Dodać fallback dla zdjęć z klasycznego HTML (np. szukanie <img> w galerii)
-            log.error("parse_photos_no_next_data", extra={"extra": {"url": html_or_url[:100]}})
-            return []
-
         image_urls: list[str] = []
-        try:
-            # Spróbujmy ścieżki "advert" (dla nowoczesnych)
-            photos_data = next_data.get("props", {}).get("pageProps", {}).get("advert", {}).get("photos", [])
-            
-            # Fallback dla starszych (może?)
-            if not photos_data:
-                 photos_data = next_data.get("props", {}).get("pageProps", {}).get("ad", {}).get("photos", [])
+        next_data = _parse_next_data(html)
 
-            for photo in photos_data:
-                if isinstance(photo, dict) and photo.get("url"):
-                    image_urls.append(photo["url"])
+        # --- Ścieżka 1: __NEXT_DATA__ (preferowana) ---
+        if next_data:
+            try:
+                # Spróbuj ścieżki "advert" (dla nowoczesnych)
+                photos_data = next_data.get("props", {}).get("pageProps", {}).get("advert", {}).get("photos", [])
+                
+                # Fallback dla starszych (może?)
+                if not photos_data:
+                     photos_data = next_data.get("props", {}).get("pageProps", {}).get("ad", {}).get("photos", [])
 
-        except Exception as e:
-            log.error("parse_photos_next_data_extract_fail", extra={"extra": {"url": html_or_url[:100], "err": str(e)}})
-            return []
+                for photo in photos_data:
+                    if isinstance(photo, dict) and photo.get("url"):
+                        image_urls.append(photo["url"])
+            except Exception as e:
+                log.error("parse_photos_next_data_extract_fail", extra={"extra": {"url": html_or_url[:100], "err": str(e)}})
+
+        # --- Ścieżka 2: Fallback do klasycznego HTML ---
+        # Jeśli ścieżka 1 nie zwróciła żadnych URL-i, uruchom ścieżkę 2
+        if not image_urls:
+            log.debug("parse_photos_using_classic_fallback", extra={"extra": {"url_or_snippet": html_or_url[:100]}})
+            image_urls = _parse_classic_photos(html)
 
         if not image_urls:
-            # TODO: Dodać fallback dla zdjęć z klasycznego HTML
-            log.warning("parse_photos_no_images_in_next_data", extra={"extra": {"url_or_snippet": html_or_url[:100]}})
+            log.warning("parse_photos_no_images_found_at_all", extra={"extra": {"url_or_snippet": html_or_url[:100]}})
             return []
 
-        # Deduplikacja
+        # Deduplikacja (ważne dla obu ścieżek)
         seen = set()
         unique_urls = [u for u in image_urls if u not in seen and (seen.add(u) or True)]
 
         return [{"seq": i, "url": u} for i, u in enumerate(unique_urls)]
-
     # --- Metody zapisu (bez zmian) ---
 
     def write_urls_csv(self, rows: Iterable[OfferIndex]) -> Path:
