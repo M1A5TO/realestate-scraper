@@ -12,7 +12,7 @@ from scrapper.adapters.gratka import GratkaAdapter
 
 from scrapper.core.http import HttpClient, build_proxies
 from scrapper.core.log import setup_json_logger, get_logger
-from scrapper.core.storage import offers_csv_path
+from scrapper.core.storage import offers_csv_path, append_offer_row
 from scrapper.core.validate import Offer
 
 REQ_FIELDS = ["price_amount","city","area_m2","rooms","lat","lon","offer_id","source"]

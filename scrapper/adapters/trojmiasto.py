@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
-import re
+import re  # Upewnij się, że 're' jest importowane
 import urllib.parse
+import reverse_geocoder as rg
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Optional
 
 from scrapper.adapters.base import BaseAdapter, OfferIndex, PhotoMeta
 from scrapper.core.http import HttpClient, join_url
-from scrapper.core.parse import soup
+from scrapper.core.parse import soup, select_text
 from scrapper.core.dedup import normalize_url
 from scrapper.core.log import get_logger
 from scrapper.core.storage import (
@@ -20,136 +21,193 @@ from scrapper.core.storage import (
 
 log = get_logger("scrapper.trojmiasto")
 
-# --- Funkcje pomocnicze (zaczerpnięte z Morizon / dostosowane) ---
+# --- Funkcje pomocnicze ---
+
+# Skopiowane z morizon.py
+_PL_BBOX = (49.0, 54.9, 14.0, 24.5)  # min_lat, max_lat, min_lon, max_lon
+
+# NOWY Regex do parsowania linków mapy "W pobliżu"
+# np. .../location/54.57011,18.47521/map/...
+LOCATION_HREF_RE = re.compile(r"location/([\d\.]+),([\d\.]+)/map")
+
 
 def _coerce_float(x: Any) -> Optional[float]:
-    """Konwertuje wartość na float, obsługując różne formaty tekstowe."""
+    """
+    Konwertuje wartość na float, obsługując różne formaty tekstowe 
+    (np. "499 000 zł", "32,25 m²").
+    """
     if x is None:
         return None
     if isinstance(x, (int, float)):
         return float(x)
-    txt = str(x).strip().replace("\xa0", " ")
-    txt = txt.replace(" ", "")
-    txt = txt.replace(",", ".")
-    m = re.match(r"^-?\d+(?:\.\d+)?$", txt)
-    return float(txt) if m else None
+    
+    try:
+        s = str(x).strip().replace("\xa0", " ").replace(" ", "").replace(",", ".")
+        m = re.match(r"^[+-]?\d+(?:\.\d+)?", s) 
+        return float(m.group(0)) if m else None
+    except Exception:
+        return None
+
+# Skopiowane z morizon.py
+def _is_plausible_pl(lat: Optional[float], lon: Optional[float]) -> bool:
+    if lat is None or lon is None:
+        return False
+    min_lat, max_lat, min_lon, max_lon = _PL_BBOX
+    return (min_lat <= float(lat) <= max_lat) and (min_lon <= float(lon) <= max_lon)
+
 
 def _offer_id_from_url(url: str) -> Optional[str]:
-    """Wyciąga ID oferty (np. 'ogl66186673') z URL-a."""
     m = re.search(r"(ogl\d{6,})", url, re.I)
     return m.group(1) if m else None
 
-def _parse_ld_json_blocks(html: str) -> list[dict]:
-    """Znajduje i parsuje wszystkie bloki <script type="application/ld+json"> w HTML-u."""
-    out: list[dict] = []
-    # Używamy re.finditer, aby złapać wszystkie bloki
-    for m in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.S | re.I):
-        raw = m.group(1).strip()
-        if not raw:
-            continue
-        try:
-            obj = json.loads(raw)
-            if isinstance(obj, list):
-                # Czasem w bloku jest lista obiektów
-                out.extend([x for x in obj if isinstance(x, dict)])
-            elif isinstance(obj, dict):
-                out.append(obj)
-        except json.JSONDecodeError:
-            log.warning("ld_json_parse_fail", extra={"snippet": raw[:100]})
-            continue
-    return out
+def _parse_next_data(html: str) -> dict:
+    try:
+        s = soup(html)
+        script_tag = s.select_one('script#__NEXT_DATA__[type="application/json"]')
+        if script_tag and script_tag.string:
+            return json.loads(script_tag.string)
+    except Exception as e:
+        log.warning("parse_next_data_fail", extra={"extra": {"err_type": type(e).__name__, "err_str": str(e)}})
+    return {}
 
-# --- Adapter ---
+
+def _parse_classic_html(html: str, data: dict[str, Any]) -> None:
+    """
+    Funkcja zapasowa (fallback) parsująca "klasyczny" widok strony.
+    """
+    log.debug("parse_offer_classic_fallback", extra={"extra": {"url": data.get("url")}})
+    
+    bs = soup(html)
+
+    # 1. Cena
+    if not data.get("price_amount"):
+        price_str = select_text(bs, 'p.xogField__value--bigPrice span')
+        price_val = _coerce_float(price_str)
+        if price_val:
+            data["price_amount"] = price_val
+            data["price_currency"] = "PLN"
+
+    # 2. Miasto
+    if not data.get("city"):
+        city_node = bs.select_one('span.xogField__value--address')
+        try:
+            if city_node and city_node.contents:
+                # Bierzemy tylko pierwszy fragment tekstu (np. "Sopot")
+                # i ignorujemy resztę (np. <br>, "Górny Sopot", ...)
+                first_text = city_node.contents[0].strip()
+                if first_text:
+                    data["city"] = first_text
+                else:
+                    # Fallback, gdyby pierwszy element był pusty
+                    data["city"] = city_node.get_text(strip=True)
+            elif city_node:
+                 data["city"] = city_node.get_text(strip=True)
+        except Exception:
+             log.warning("parse_classic_city_fail", extra={"extra": {"url": data.get("url")}})
+
+    # 3. Powierzchnia
+    if not data.get("area_m2"):
+        try:
+            area_node = bs.select_one('span.xogField__label:-soup-contains("Powierzchnia")')
+            if area_node:
+                area_val_node = area_node.find_next_sibling('span', class_='xogField__value--big')
+                if area_val_node:
+                    data["area_m2"] = _coerce_float(area_val_node.get_text())
+        except Exception:
+            log.warning("parse_classic_area_fail", extra={"extra": {"url": data.get("url")}})
+
+    # 4. Pokoje
+    if not data.get("rooms"):
+        try:
+            rooms_node = bs.select_one('span.xogField__label:-soup-contains("Liczba pokoi")')
+            if rooms_node:
+                rooms_val_node = rooms_node.find_next_sibling('span', class_='xogField__value--big')
+                if rooms_val_node:
+                    data["rooms"] = _coerce_float(rooms_val_node.get_text())
+        except Exception:
+            log.warning("parse_classic_rooms_fail", extra={"extra": {"url": data.get("url")}})
+            
+    # 5. Lat/Lon (OSTATECZNA POPRAWKA: Używamy linków "w pobliżu")
+    if not _is_plausible_pl(data.get("lat"), data.get("lon")):
+        lat_val, lon_val = None, None
+        
+        # Znajdź pierwszy link do mapy "w pobliżu"
+        #
+        nearby_link = bs.select_one('a[data-map-point][href*="location/"]')
+        if nearby_link:
+            href = nearby_link.get("href", "")
+            match = LOCATION_HREF_RE.search(href)
+            if match:
+                lat_val = _coerce_float(match.group(1))
+                lon_val = _coerce_float(match.group(2))
+
+        if _is_plausible_pl(lat_val, lon_val):
+            data["lat"] = lat_val
+            data["lon"] = lon_val
+        else:
+             log.warning("parse_classic_latlon_fail", extra={"extra": {"url": data.get("url"), "msg": "Failed to find lat/lon in nearby_links (a[data-map-point])"}})
+
+
+    # 6. Oblicz price_per_m2 (jeśli to możliwe)
+    if not data.get("price_per_m2"):
+        if data.get("price_amount") and data.get("area_m2") and data["area_m2"] > 0:
+            data["price_per_m2"] = round(data["price_amount"] / data["area_m2"], 2)
+
 
 @dataclass
 class TrojmiastoAdapter(BaseAdapter):
     source: str = "trojmiasto"
     http: Optional[HttpClient] = None
-    out_dir: Optional[Path] = None # Używane przez metody write_* (na razie brak)
+    out_dir: Optional[Path] = None
 
     def with_deps(self, http: HttpClient, out_dir: Path, **kwargs):
-        """Wstrzykuje zależności (HttpClient, ścieżka wyjściowa)."""
         self.http = http
         self.out_dir = out_dir
-        # kwargs (np. use_osm_geocode) jest ignorowane, bo mamy geo z ld+json
         return self
 
     def discover(self, *, city: str, deal: str, kind: str, max_pages: int = 1) -> Iterable[OfferIndex]:
-        """
-        Zwraca URL-e ofert z listingu.
-        Struktura URL-a: https://ogloszenia.trojmiasto.pl/nieruchomosci/{kategoria-deal}/?strona={N}
-        Np.: /nieruchomosci/s,Mieszkanie%20na%20sprzeda%C5%BC.html
-        Np.: /nieruchomosci/s,Dom%20na%20sprzeda%C5%BC.html
-        Np.: /nieruchomosci/s,Dzia%C5%82ka%20na%20sprzeda%C5%BC.html
-        """
-        assert self.http is not None, "HttpClient not set. Call with_deps()."
-        
-        # Tłumaczenie parametrów wejściowych na format Trojmiasto.pl
+        assert self.http is not None
         deal_map = {"sprzedaz": "sprzedaż", "wynajem": "wynajem"}
         kind_map = {
-            "mieszkanie": "Mieszkanie",
-            "dom": "Dom",
-            "dzialka": "Działka",
-            "lokal": "Lokal",
+            "mieszkanie": "Mieszkanie", "dom": "Dom",
+            "dzialka": "Działka", "lokal": "Lokal",
         }
-        
         deal_slug = deal_map.get(str(deal).lower(), "sprzedaż")
         kind_slug = kind_map.get(str(kind).lower(), "Mieszkanie")
-
-        # Tworzenie slug-a wyszukiwania, np. "Mieszkanie na sprzedaż"
         search_slug = f"{kind_slug} na {deal_slug}"
-        # URL-safe encoding, np. "Mieszkanie%20na%20sprzeda%C5%BC"
         search_slug_encoded = urllib.parse.quote(search_slug)
-        
         base_url = f"https://ogloszenia.trojmiasto.pl/nieruchomosci/s,{search_slug_encoded}.html"
-        
         rows: list[OfferIndex] = []
         dedup_ids: set[str] = set()
-        
         for page in range(1, int(max_pages) + 1):
             page_url = f"{base_url}?strona={page}" if page > 1 else base_url
-            
             try:
                 html = self.http.get(page_url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": page_url, "err": type(e).__name__}})
                 continue
-
             bs = soup(html)
-            # Selektor dla linków do ofert
             links = bs.select('a[href*="/nieruchomosci-"][href*="ogl"]')
-            
             found_links_count = 0
             for a in links:
                 href = a.get("href")
-                if not href:
-                    continue
-                    
+                if not href: continue
                 full_url = normalize_url(join_url(base_url, href))
                 oid = _offer_id_from_url(full_url)
-                
-                if not oid or oid in dedup_ids:
-                    continue
-                
+                if not oid or oid in dedup_ids: continue
                 dedup_ids.add(oid)
-                rows.append({
-                    "offer_url": full_url,
-                    "offer_id": oid,
-                    "page_idx": page,
-                })
+                rows.append({"offer_url": full_url, "offer_id": oid, "page_idx": page})
                 found_links_count += 1
-
             log.info("discover_page", extra={"extra": {"page": page, "found": found_links_count, "kept": len(rows)}})
-            
-            # Sprawdzenie, czy jest następna strona (jeśli nie ma linków, to prawdopodobnie koniec)
             if not links or found_links_count == 0:
                 log.info("discover_finish_no_more_links", extra={"extra": {"page": page}})
                 break
-
         return rows
 
+    # --- OSTATECZNA WERSJA parse_offer (hybrydowa) ---
+    
     def parse_offer(self, url: str) -> dict:
-        """Pobiera i parsuje dane ze strony oferty, głównie z ld+json."""
+        """Pobiera i parsuje dane ze strony oferty (obsługuje __NEXT_DATA__ i klasyczny HTML)."""
         assert self.http is not None
         url = normalize_url(url)
         html = self.http.get(url, accept="text/html").text
@@ -160,97 +218,154 @@ class TrojmiastoAdapter(BaseAdapter):
             "offer_id": _offer_id_from_url(url) or "",
         }
 
-        ld_blocks = _parse_ld_json_blocks(html)
+        # --- Scieżka 1: "Nowoczesna" strona (__NEXT_DATA__) ---
+        next_data = _parse_next_data(html)
+        ad_data = {} # Zainicjuj puste
         
-        # Szukamy głównego bloku (zazwyczaj 'Product' lub 'Offer')
-        main_block = None
-        for block in ld_blocks:
-            type_ = block.get("@type")
-            if type_ == "Product" and "offers" in block:
-                main_block = block
-                break
-            if type_ == "Offer": # Fallback
-                main_block = block
-                break
+        if next_data:
+            try:
+                # Sprawdź OBA klucze, "advert" jest preferowany
+                ad_data = next_data.get("props", {}).get("pageProps", {}).get("advert", {})
+                if not ad_data:
+                    ad_data = next_data.get("props", {}).get("pageProps", {}).get("ad", {})
+
+                if ad_data:
+                    data["title"] = ad_data.get("title")
+
+                    price_data = ad_data.get("price", {})
+                    if isinstance(price_data, dict):
+                        data["price_amount"] = _coerce_float(price_data.get("value"))
+                        data["price_currency"] = price_data.get("currency")
+
+                    data["posted_at"] = ad_data.get("createdAt")
+                    data["updated_at"] = ad_data.get("refreshedAt")
+
+                    # UWAGA: 'coordinates' jest często 'null' w __NEXT_DATA__
+                    #
+                    coords = ad_data.get("location", {}).get("coordinates", {})
+                    if isinstance(coords, dict):
+                        data["lat"] = _coerce_float(coords.get("latitude"))
+                        data["lon"] = _coerce_float(coords.get("longitude"))
+
+                    loc = ad_data.get("location", {})
+                    if isinstance(loc, dict):
+                        data["city"] = loc.get("city", {}).get("name")
+                        data["district"] = loc.get("district", {}).get("name")
+
+                    characteristics = ad_data.get("characteristics", [])
+                    if isinstance(characteristics, list):
+                        for item in characteristics:
+                            if not isinstance(item, dict): continue
+                            key = item.get("key")
+                            val = item.get("value")
+                            if key == "m": # Powierzchnia
+                                data["area_m2"] = _coerce_float(val)
+                            elif key == "rooms_num": # Pokoje
+                                data["rooms"] = _coerce_float(val)
+                    
+                    if not data.get("price_per_m2"):
+                        if data.get("price_amount") and data.get("area_m2") and data["area_m2"] > 0:
+                            data["price_per_m2"] = round(data["price_amount"] / data["area_m2"], 2)
+
+            except Exception as e:
+                log.error("parse_offer_next_data_extract_fail", extra={"extra": {"url": url, "err": str(e), "err_type": type(e).__name__}})
         
-        if not main_block:
-            log.error("parse_offer_no_main_ld_block", extra={"extra": {"url": url}})
-            return data # Zwróć puste dane (tylko z URL i ID)
-
-        try:
-            # Tytuł
-            if main_block.get("name"):
-                data["title"] = str(main_block["name"]).strip()
-
-            # Cena i waluta (zagnieżdżone w 'offers')
-            offers_data = main_block.get("offers")
-            if isinstance(offers_data, dict):
-                if offers_data.get("price"):
-                    data["price_amount"] = _coerce_float(offers_data["price"])
-                if offers_data.get("priceCurrency"):
-                    data["price_currency"] = str(offers_data["priceCurrency"]).upper()
-
-            # Powierzchnia (zagnieżdżone w 'floorSize')
-            floor_size_data = main_block.get("floorSize")
-            if isinstance(floor_size_data, dict) and floor_size_data.get("value") is not None:
-                data["area_m2"] = _coerce_float(floor_size_data["value"])
+        if not ad_data or not data.get("price_amount") or not _is_plausible_pl(data.get("lat"), data.get("lon")):
+            if not next_data:
+                log.debug("parse_offer_classic_html", extra={"extra": {"url": url}})
+            else:
+                log.warning("parse_offer_next_data_empty_or_incomplete", extra={"extra": {"url": url}})
             
-            # Pokoje
-            if main_block.get("numberOfRooms") is not None:
-                data["rooms"] = _coerce_float(main_block["numberOfRooms"])
+            _parse_classic_html(html, data) # Wypełnij brakujące dane
 
-            # Lokalizacja (Geo)
-            geo_data = main_block.get("geo")
-            if isinstance(geo_data, dict):
-                data["lat"] = _coerce_float(geo_data.get("latitude"))
-                data["lon"] = _coerce_float(geo_data.get("longitude"))
+        if _is_plausible_pl(data.get("lat"), data.get("lon")):
+            try:
+                coords = (data["lat"], data["lon"])
+                result = rg.search(coords, mode=1) 
 
-            # Lokalizacja (Adres)
-            address_data = main_block.get("address")
-            if isinstance(address_data, dict):
-                data["city"] = address_data.get("addressLocality")
-                # Trojmiasto.pl nie zawsze podaje ulicę w ld+json
-                data["street"] = address_data.get("streetAddress") 
+                if result:
+                    city_name = result[0].get('name')
+                    if city_name:
+                        data["city"] = city_name
 
-            # Daty
-            if main_block.get("datePosted"):
-                data["posted_at"] = str(main_block["datePosted"]).strip()
-            if main_block.get("dateModified"):
-                data["updated_at"] = str(main_block["dateModified"]).strip()
-
-        except Exception as e:
-            log.error("parse_offer_ld_extract_fail", extra={"extra": {"url": url, "err": str(e)}})
+            except Exception as e:
+                log.warning("reverse_geocode_fail", extra={"extra": {"url": url, "err": str(e)}})
 
         return data
+    
+    # --- Pozostałe metody (photos i write_*) ---
+
+    def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
+        """Pobiera linki do zdjęć z __NEXT_DATA__."""
+        assert self.http is not None
+        
+        if html_or_url.startswith("http"):
+            url = normalize_url(html_or_url)
+            try:
+                html = self.http.get(url, accept="text/html").text
+            except Exception as e:
+                log.warning("parse_photos_fetch_fail", extra={"extra": {"url": html_or_url, "err": str(e)}})
+                return []
+        else:
+            html = html_or_url
+
+        next_data = _parse_next_data(html)
+        if not next_data:
+            # TODO: Dodać fallback dla zdjęć z klasycznego HTML (np. szukanie <img> w galerii)
+            log.error("parse_photos_no_next_data", extra={"extra": {"url": html_or_url[:100]}})
+            return []
+
+        image_urls: list[str] = []
+        try:
+            # Spróbujmy ścieżki "advert" (dla nowoczesnych)
+            photos_data = next_data.get("props", {}).get("pageProps", {}).get("advert", {}).get("photos", [])
+            
+            # Fallback dla starszych (może?)
+            if not photos_data:
+                 photos_data = next_data.get("props", {}).get("pageProps", {}).get("ad", {}).get("photos", [])
+
+            for photo in photos_data:
+                if isinstance(photo, dict) and photo.get("url"):
+                    image_urls.append(photo["url"])
+
+        except Exception as e:
+            log.error("parse_photos_next_data_extract_fail", extra={"extra": {"url": html_or_url[:100], "err": str(e)}})
+            return []
+
+        if not image_urls:
+            # TODO: Dodać fallback dla zdjęć z klasycznego HTML
+            log.warning("parse_photos_no_images_in_next_data", extra={"extra": {"url_or_snippet": html_or_url[:100]}})
+            return []
+
+        # Deduplikacja
+        seen = set()
+        unique_urls = [u for u in image_urls if u not in seen and (seen.add(u) or True)]
+
+        return [{"seq": i, "url": u} for i, u in enumerate(unique_urls)]
+
+    # --- Metody zapisu (bez zmian) ---
 
     def write_urls_csv(self, rows: Iterable[OfferIndex]) -> Path:
-        """Zapisuje zmaterializowane URL-e do urls.csv"""
         assert self.out_dir is not None, "out_dir not set. Call with_deps()."
         header = ["offer_url", "offer_id", "page_idx", "source"]
-        materialized = []
-        for r in rows or []:
-            d = dict(r)
-            d["source"] = self.source
-            materialized.append(d)
+        materialized = [{"source": self.source, **dict(r)} for r in rows or []]
         path = urls_csv_path(self.out_dir)
         append_rows_csv(path, materialized, header)
         return path
 
     def write_offers_csv(self, rows: list[dict]) -> Path:
-        """Zapisuje oferty do offers.csv używając globalnego nagłówka."""
         assert self.out_dir is not None
         path = offers_csv_path(self.out_dir)
         for r in rows or []:
             r.pop("first_seen", None)
             r.pop("last_seen", None)
-            append_offer_row(path, r)   
+            append_offer_row(path, r)
         return path
 
     def write_photo_links_csv(
         self, *, offer_id: str, offer_url: str,
         photo_list: list[PhotoMeta], limit: int | None = None,
     ) -> Path:
-        """Zapisuje zmapowane linki do zdjęć do photos.csv"""
         assert self.out_dir is not None
         rows: list[dict] = []
         cap = len(photo_list) if limit is None else min(limit, len(photo_list))
@@ -264,62 +379,11 @@ class TrojmiastoAdapter(BaseAdapter):
             else:
                 try:
                     url = ph[1]; seq = ph[0] if isinstance(ph[0], int) else None
-                except Exception:
-                    continue
-            
-            if not url:
-                continue
-                
-            if seq is None:
-                seq = seq_auto
-                
+                except Exception: continue
+            if not url: continue
+            if seq is None: seq = seq_auto
             rows.append({"offer_id": offer_id, "seq": int(seq), "url": url})
             seq_auto = int(seq) + 1
-
         path = photos_csv_path(self.out_dir)
         append_rows_csv(path, rows, header=["offer_id", "seq", "url"])
         return path
-
-    def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
-        """Pobiera linki do zdjęć z bloku ld+json."""
-        assert self.http is not None
-        
-        if html_or_url.startswith("http"):
-            url = normalize_url(html_or_url)
-            try:
-                html = self.http.get(url, accept="text/html").text
-            except Exception as e:
-                log.warning("parse_photos_fetch_fail", extra={"extra": {"url": html_or_url, "err": str(e)}})
-                return []
-        else:
-            html = html_or_url
-
-        ld_blocks = _parse_ld_json_blocks(html)
-        
-        image_urls: list[str] = []
-        
-        for block in ld_blocks:
-            images = block.get("image")
-            if not images:
-                continue
-            
-            if isinstance(images, list):
-                # Oczekiwany format: lista stringów URL
-                image_urls.extend([str(img) for img in images if isinstance(img, str) and img.startswith("http")])
-            elif isinstance(images, str) and images.startswith("http"):
-                # Czasem może być pojedynczy URL
-                image_urls.append(images)
-
-        if not image_urls:
-            log.warning("parse_photos_no_images_in_ld_json", extra={"extra": {"url_or_snippet": html_or_url[:100]}})
-            return []
-
-        # Deduplikacja przy zachowaniu kolejności
-        seen = set()
-        unique_urls = []
-        for u in image_urls:
-            if u not in seen:
-                seen.add(u)
-                unique_urls.append(u)
-
-        return [{"seq": i, "url": u} for i, u in enumerate(unique_urls)]
