@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-
+from typing import Optional
 from scrapper.core.log import setup_json_logger
 from scrapper.core.storage import offers_csv_path, photos_csv_path, urls_csv_path
 
@@ -93,41 +93,82 @@ def run_morizon_full(
     kind: str,
     max_pages: int,
     out_dir: Path,
-    img_dir: Path,
+    img_dir: Optional[Path],
     user_agent: str,
     timeout_s: float,
     rps: float,
-    limit_photos: int | None,
-    http_proxy: str | None,
-    https_proxy: str | None,
+    limit_photos: Optional[int],
+    http_proxy: Optional[str],
+    https_proxy: Optional[str],
 ) -> dict:
+    """
+    End-to-end pipeline dla Morizon:
+      1) discover -> zapis urls.csv
+      2) detail (twarda walidacja REQ_FIELDS + zapis tylko docelowych kolumn) -> offers.csv
+      3) photos -> photos.csv (+ opcjonalnie pobranie obrazów do img_dir)
+
+    Zwraca ujednolicone statystyki zgodne z innymi źródłami.
+    """
     log = setup_json_logger("scrapper")
+
+    # Katalogi wyjściowe
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if img_dir is not None:
+        img_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) DISCOVER
     st1 = run_morizon_discover(
-        city=city, deal=deal, kind=kind, max_pages=max_pages,
-        out_dir=out_dir, user_agent=user_agent, timeout_s=timeout_s, rps=rps,
-        http_proxy=http_proxy, https_proxy=https_proxy,
+        city=city,
+        deal=deal,
+        kind=kind,
+        max_pages=max_pages,
+        out_dir=out_dir,
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
     )
+
+    # 2) DETAIL — używa poprawionej wersji, która zapisuje wyłącznie:
+    # offer_id,source,url,price_amount,price_currency,price_per_m2,city,lat,lon,area_m2,rooms
     st2 = run_morizon_detail(
-        urls_csv=urls_csv_path(out_dir), out_dir=out_dir,
-        user_agent=user_agent, timeout_s=timeout_s, rps=rps,
-        http_proxy=http_proxy, https_proxy=https_proxy,
+        urls_csv=urls_csv_path(out_dir),
+        out_dir=out_dir,
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
+        allow_incomplete=False,   # twarda walidacja jak w gratka/otodom
+        dump_debug=True,
     )
+
+    # 3) PHOTOS
     st3 = run_morizon_photos(
-        offers_csv=offers_csv_path(out_dir), out_dir=out_dir, img_dir=img_dir,
-        user_agent=user_agent, timeout_s=timeout_s, rps=rps,
-        limit_per_offer=limit_photos, http_proxy=http_proxy, https_proxy=https_proxy,
+        offers_csv=offers_csv_path(out_dir),
+        out_dir=out_dir,
+        img_dir=img_dir,
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        limit_per_offer=limit_photos,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
     )
+
+    # Ujednolicone statystyki
     stats = {
         "discover_pages": max_pages,
         "offers_ok": st2.get("offers_ok", 0),
         "offers_fail": st2.get("offers_fail", 0),
-        "photos_ok": st3.get("photos_ok", 0),
-        "photos_fail": st3.get("photos_fail", 0),
+        "photos_ok": st3.get("photos_ok", st3.get("photos", 0)),
+        "photos_fail": st3.get("photos_fail", st3.get("fail", 0)),
         "urls_csv": int(urls_csv_path(out_dir).exists()),
         "offers_csv": int(offers_csv_path(out_dir).exists()),
         "photos_csv": int(photos_csv_path(out_dir).exists()),
     }
-    log.info("run_full_done", extra={"extra": stats})
+    log.info("run_full_done", extra={"extra": {"source": "morizon", **stats}})
     return stats
 
 def run_gratka_full(
