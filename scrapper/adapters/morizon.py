@@ -17,7 +17,7 @@ log = get_logger("scrapper.morizon")
 import hashlib
 import time
 from math import radians, sin, cos, asin, sqrt
-
+from datetime import datetime 
 # ---------- Pomocnicze ----------
 
 _PL_BBOX = (49.0, 54.9, 14.0, 24.5)  # min_lat, max_lat, min_lon, max_lon (z lekkim marginesem)
@@ -344,6 +344,17 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dλ = λ2 - λ1
     a = sin(dφ/2)**2 + cos(φ1)*cos(φ2)*sin(dλ/2)**2
     return 2*R*asin(a**0.5)
+
+
+def _coerce_int(v):
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+
+
 # ---------- Adapter ----------
 
 @dataclass
@@ -380,12 +391,12 @@ class MorizonAdapter(BaseAdapter):
             append_offer_row(path, r)   # wymusza stałą kolejność kolumn i nagłówek
         return path
 
-    def write_photos_csv(self, rows: list[PhotoMeta]) -> Path:
-        assert self.out_dir is not None
-        header = ["source","offer_id","seq","url","width","height","local_path","bytes","hash","status","downloaded_at"]
-        path = photos_csv_path(self.out_dir)
-        append_rows_csv(path, rows, header)
-        return path
+    # def write_photos_csv(self, rows: list[PhotoMeta]) -> Path:
+    #     assert self.out_dir is not None
+    #     header = ["source","offer_id","seq","url","width","height","local_path","bytes","hash","status","downloaded_at"]
+    #     path = photos_csv_path(self.out_dir)
+    #     append_rows_csv(path, rows, header)
+    #     return path
 
     def _geo_cache_path(self) -> Path:
         assert self.out_dir is not None
@@ -625,3 +636,115 @@ class MorizonAdapter(BaseAdapter):
             log.info("discover_page", extra={"extra": {"page": page, "found": len(links), "kept": len(rows)}})
 
         return rows
+    
+    def with_deps(self, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
+        self.http = http
+        self.out_dir = out_dir
+        self.use_osm_geocode = use_osm_geocode
+        return self
+    
+    def parse_photos(self, html_or_url: str) -> list[PhotoMeta]:
+        """
+        Zwraca wszystkie zdjęcia z galerii Morizon (strona .../photo).
+        Buduje absolutne URL-e, deduplikuje, numeruje seq od 0.
+        Nie zapisuje plików, tylko linki.
+        """
+        assert self.http is not None, "HttpClient not set. Call with_deps()."
+
+        def _best_from_srcset(srcset: str) -> str | None:
+            best, best_w = None, -1
+            for part in (srcset or "").split(","):
+                p = part.strip().split()
+                if not p:
+                    continue
+                url = p[0]
+                w = 0
+                if len(p) > 1 and p[1].lower().endswith("w"):
+                    try:
+                        w = int(p[1][:-1])
+                    except:
+                        w = 0
+                if w > best_w:
+                    best, best_w = url, w
+            return best
+
+        # 1) Ustal właściwy URL galerii
+        if html_or_url.startswith("http"):
+            base = html_or_url.split("?")[0].rstrip("/")
+            photo_url = base + ("/photo" if not base.endswith("/photo") else "")
+            html = self.http.get(photo_url, accept="text/html").text
+        else:
+            # rzadki przypadek: ktoś podał już HTML
+            html = html_or_url
+
+        # 2) Parsuj tylko zdjęcia z kontenera galerii
+        s = soup(html)
+        seen = set()
+        urls: list[str] = []
+
+        # tylko elementy galerii, nie ikonki UI ani reklamy
+        sel = (
+            "#gallery__photos img[src], "
+            "#gallery__photos img[data-src], "
+            ".gallery__photos img[src], "
+            ".gallery__photos img[data-src], "
+            ".gallery__photos picture source[srcset]"
+        )
+        for el in s.select(sel):
+            # preferuj source/srcset (największy wariant), inaczej img src/data-src
+            if el.name == "source":
+                cand = _best_from_srcset(el.get("srcset") or "")
+            else:
+                cand = el.get("data-src") or el.get("src")
+
+            if not cand:
+                continue
+
+            # odfiltruj logotypy, ikony, placeholdery, 1x1
+            low = cand.lower()
+            if ("nuxt-assets" in low or "svg" in low or "icon" in low or
+                "placeholder" in low or "1x1" in low or "adsystem" in low or
+                "onet-ad" in low):
+                continue
+
+            u = normalize_url(join_url("https://www.morizon.pl", cand))
+            if u in seen:
+                continue
+            seen.add(u)
+            urls.append(u)
+
+        # 3) Zbuduj strukturę wyjściową
+        return [{"seq": i, "url": u} for i, u in enumerate(urls)]
+
+
+
+    
+    def write_photo_links_csv(
+        self, *, offer_id: str, offer_url: str,
+        photo_list: list[PhotoMeta], limit: int | None = None,
+    ) -> Path:
+        assert self.out_dir is not None
+        rows: list[dict] = []
+        cap = len(photo_list) if limit is None else min(limit, len(photo_list))
+        seq_auto = 0
+        for i in range(cap):
+            ph = photo_list[i]
+            if isinstance(ph, dict):
+                url = ph.get("url") or ""; seq = ph.get("seq")
+            elif isinstance(ph, str):
+                url = ph; seq = None
+            else:
+                try:
+                    url = ph[1]; seq = ph[0] if isinstance(ph[0], int) else None
+                except Exception:
+                    continue
+            if not url:
+                continue
+            if seq is None:
+                seq = seq_auto
+            rows.append({"offer_id": offer_id, "seq": int(seq), "url": url})
+            seq_auto = int(seq) + 1
+        from scrapper.core.storage import photos_csv_path, append_rows_csv
+        path = photos_csv_path(self.out_dir)
+        append_rows_csv(path, rows, header=["offer_id", "seq", "url"])
+        return path
