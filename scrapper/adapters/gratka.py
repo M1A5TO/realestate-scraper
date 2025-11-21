@@ -593,10 +593,9 @@ class GratkaAdapter(BaseAdapter):
         assert self.http is not None
         html = self.http.get(url, accept="text/html").text
         s = soup(html)
-        out: dict[str, Any] = {
-            "source": self.source,
-            "url": normalize_url(url),
-        }
+        out: dict = {}
+        out["source"] = self.source  
+        out["url"] = url             
         if not out.get("offer_id"):
             m = re.search(r"/ob/(\d+)", url)
             if m:

@@ -392,13 +392,18 @@ def _deal_path(deal: str) -> str:
 
 def _build_listing_url(city: str, deal: str, kind: str, page: int) -> str:
     """Nowy wzorzec listingu: /pl/oferty/{deal}/{kind}/{city_slug}?page=N."""
+
+    # normalizacja deal/kind (obsłuży np. 'sprzedaż', 'sprzedaz', 'mieszkania', 'MIESZKANIE')
+    deal_path = _deal_path(deal)
+    kind_path = _kind_path(kind)
+
     city_slug = (
         city.strip().lower()
         .replace(" ", "-")
         .replace("ą", "a").replace("ć", "c").replace("ę", "e").replace("ł", "l")
         .replace("ń", "n").replace("ó", "o").replace("ś", "s").replace("ź", "z").replace("ż", "z")
     )
-    base = f"https://www.otodom.pl/pl/oferty/{deal}/{kind}/{city_slug}"
+    base = f"https://www.otodom.pl/pl/oferty/{deal_path}/{kind_path}/{city_slug}"
     return f"{base}?page={page}"
 
 def _extract_offer_links(html: str) -> list[str]:
