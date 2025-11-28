@@ -12,11 +12,17 @@ from scrapper.adapters.gratka import GratkaAdapter
 
 from scrapper.core.http import HttpClient, build_proxies
 from scrapper.core.log import setup_json_logger, get_logger
-from scrapper.core.storage import offers_csv_path, append_offer_row
+from scrapper.core.storage import offers_csv_path, append_offer_row, append_rows_csv
 from scrapper.core.validate import Offer
 
 REQ_FIELDS = ["price_amount","city","area_m2","rooms","lat","lon","offer_id","source"]
+OFFER_SCHEMA = ["offer_id","source","url","price_amount","price_currency","price_per_m2","city","lat","lon","area_m2","rooms"]
+
 log = get_logger("scrapper")
+
+def _project_offer_row(d: dict) -> dict:
+    # wartości poza schema są ignorowane; brakujące uzupełniane pustką
+    return {k: d.get(k, "") for k in OFFER_SCHEMA}
 
 def _is_complete(d: dict) -> bool:
     return all(d.get(k) not in (None, "") for k in REQ_FIELDS)
@@ -132,8 +138,8 @@ def run_morizon_detail(
     rps: float,
     http_proxy: str | None,
     https_proxy: str | None,
-    allow_incomplete: bool = False,   # NEW
-    dump_debug: bool = True,          # NEW
+    allow_incomplete: bool = False,   # zostawiamy przełącznik, ale domyślnie twarda walidacja
+    dump_debug: bool = True,
 ) -> dict:
     import json, traceback
     from datetime import datetime
@@ -147,6 +153,10 @@ def run_morizon_detail(
     )
 
     urls = _read_urls(urls_csv)
+    if not urls:
+        log.info("detail_no_input", extra={"extra": {"source": "morizon", "urls_csv": str(urls_csv)}})
+        return {"offers_ok": 0, "offers_fail": 0}
+
     ok = 0
     fail = 0
     batch: list[dict] = []
@@ -154,7 +164,7 @@ def run_morizon_detail(
     adapter = MorizonAdapter().with_deps(
         http=http,
         out_dir=out_dir,
-        use_osm_geocode=True,   # fallback do OSM w razie braku geo
+        use_osm_geocode=True,
     )
 
     now = datetime.utcnow()
@@ -163,63 +173,68 @@ def run_morizon_detail(
     html_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        for _i, u in enumerate(urls, 1):
+        for idx, u in enumerate(urls, 1):
             try:
-                data = adapter.parse_offer(u)
-                data.setdefault("first_seen", now)
-                data.setdefault("last_seen", now)
+                d = adapter.parse_offer(u)
+                # nie chcemy first_seen/last_seen w CSV, ale można trzymać do debugów
+                d.setdefault("first_seen", now)
+                d.setdefault("last_seen", now)
 
-                missing = [k for k in REQ_FIELDS if data.get(k) in (None, "")]
+                missing = [k for k in REQ_FIELDS if d.get(k) in (None, "")]
                 if dump_debug and dbg:
                     dbg.write(json.dumps(
-                        {"url": u, "missing": missing,
-                        "data": {k: _iso_or_same(v) for k, v in data.items()}},
+                        {"source":"morizon","url": u, "missing": missing,
+                         "data": {k: _iso_or_same(v) for k, v in d.items()}},
                         ensure_ascii=False
                     ) + "\n")
 
-                if not missing:
-                    Offer(**data)                # walidacja
-                    batch.append(data); ok += 1
-                else:
-                    if allow_incomplete:
-                        batch.append(data); ok += 1
-                        log.warning("detail_incomplete_keep", extra={"extra": {"url": u, "missing": missing}})
-                    else:
-                        fail += 1
-                        log.warning("detail_incomplete_skip", extra={"extra": {"url": u, "missing": missing}})
-            except Exception as e:
+                if missing and not allow_incomplete:
+                    fail += 1
+                    log.warning("detail_incomplete_skip", extra={"extra": {"source":"morizon","url": u, "missing": missing}})
+                    continue
+
+                # Walidacja typów
+                Offer(**d)
+
+                # PROJEKCJA -> tylko docelowy schemat kolumn
+                batch.append(_project_offer_row(d))
+                ok += 1
+
+            except ValidationError as e:
                 fail += 1
-                # zrzut problematycznego HTML
+                if dump_debug:
+                    log.warning("detail_validate_fail", extra={"extra":{"source":"morizon","url":u,"err":"ValidationError","fields":list(e.errors())}})
+            except Exception:
+                fail += 1
+                # zrzut HTML do analizy
                 try:
                     raw = adapter.http.get(u, accept="text/html").text
-                    oid = _offer_id_from_url(u) if '_offer_id_from_url' in globals() else None
-                    fname = (oid or f"err_{_i}").replace("/", "_") + ".html"
+                    fname = f"err_{idx}.html"
                     (html_dir / fname).write_text(raw, encoding="utf-8", errors="ignore")
                 except Exception:
                     pass
-                tb = traceback.format_exc()
-                if dump_debug and dbg:
-                    dbg.write(json.dumps(
-                        {"url": u, "missing": missing,
-                        "data": {k: _iso_or_same(v) for k, v in data.items()}},
-                        ensure_ascii=False
-                    ) + "\n")
-                log.warning("detail_parse_fail", extra={"extra": {"url": u, "err": type(e).__name__}})
+                if dump_debug:
+                    log.warning("detail_parse_fail", extra={"extra":{"source":"morizon","url":u,"err":"ParseError"}})
 
+            # zapis wsadowy co 50
             if len(batch) >= 50:
-                adapter.write_offers_csv(batch)
+                out_csv = offers_csv_path(out_dir)
+                append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
                 batch.clear()
 
+        # flush końcowy
         if batch:
-            adapter.write_offers_csv(batch)
+            out_csv = offers_csv_path(out_dir)
+            append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
             batch.clear()
 
-        log.info("detail_done", extra={"extra": {"ok": ok, "fail": fail, "out": str(offers_csv_path(out_dir))}})
+        log.info("detail_done", extra={"extra": {"source":"morizon","ok": ok, "fail": fail, "out": str(offers_csv_path(out_dir))}})
         return {"offers_ok": ok, "offers_fail": fail}
     finally:
         http.close()
         if dbg:
             dbg.close()
+
 
 def run_gratka_detail(
     *,
@@ -260,19 +275,19 @@ def run_gratka_detail(
     fail = 0
     batch: list[dict] = []
 
+
     for u in urls:
         try:
             d = adapter.parse_offer(u)
             d.setdefault("source", "gratka")
-            # twarda walidacja jak w morizon/otodom
             missing = [k for k in REQ_FIELDS if d.get(k) in (None, "")]
             if missing:
                 fail += 1
                 if dump_debug:
-                    log.warning("detail_incomplete_skip", extra={"extra": {"source":"gratka","url":u,"missing":missing}})
+                    log.warning("detail_incomplete_skip", extra={"extra":{"source":"gratka","url":u,"missing":missing}})
                 continue
-            Offer(**d)
-            batch.append(d)
+            Offer(**d)  # walidacja typów
+            batch.append(_project_offer_row(d))  # <-- TUTAJ PROJEKCJA DO SCHEMATU
             ok += 1
         except ValidationError as e:
             fail += 1
@@ -285,22 +300,13 @@ def run_gratka_detail(
 
         if len(batch) >= 50:
             out_csv = offers_csv_path(out_dir)
-            from scrapper.core.storage import append_offer_row
-            for row in batch:
-                # usuwamy ewentualne klucze spoza schematu
-                row.pop("first_seen", None)
-                row.pop("last_seen", None)
-                append_offer_row(out_csv, row)
+            append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)  # <-- ZAPIS TYLKO TYCH KOLUMN I W TEJ KOLEJNOŚCI
             batch.clear()
 
     # flush końcowy
     if batch:
         out_csv = offers_csv_path(out_dir)
-        from scrapper.core.storage import append_offer_row
-        for row in batch:
-            row.pop("first_seen", None)
-            row.pop("last_seen", None)
-            append_offer_row(out_csv, row)
+        append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
 
 
 
@@ -321,8 +327,7 @@ def run_trojmiasto_detail(
     allow_incomplete: bool = False,
     dump_debug: bool = True,
 ) -> dict:
-    
-    # Import adaptera wewnątrz funkcji
+    # Import lokalny, by uniknąć cyklicznych zależności
     from scrapper.adapters.trojmiasto import TrojmiastoAdapter
 
     log = setup_json_logger("scrapper")
@@ -343,30 +348,21 @@ def run_trojmiasto_detail(
     batch: list[dict] = []
 
     adapter = TrojmiastoAdapter().with_deps(http=http, out_dir=out_dir)
-
     now = datetime.utcnow()
-    # Ścieżka do pliku debug
-    dbg_path = out_dir / "offers_debug.jsonl"
-    dbg = dbg_path.open("a", encoding="utf-8") if dump_debug else None
-    
+
+    dbg = (out_dir / "offers_debug.jsonl").open("a", encoding="utf-8") if dump_debug else None
     try:
         for u in urls:
             try:
-                # Krok 1: Parsuj ofertę
                 d = adapter.parse_offer(u)
-                if not d:
-                    raise Exception("Adapter returned empty data")
-                
-                d["first_seen"] = now
-                d["last_seen"] = now
+                # metadane do debugów (nie trafią do CSV dzięki projekcji)
+                d.setdefault("first_seen", now)
+                d.setdefault("last_seen", now)
 
-                # Krok 2: Walidacja
                 missing = [k for k in REQ_FIELDS if d.get(k) in (None, "")]
-                
                 if dump_debug and dbg:
-                    # Zapisz log debugowania (logika z run_gratka_detail)
                     dbg.write(json.dumps(
-                        {"url": u, "missing": missing,
+                        {"source": "trojmiasto", "url": u, "missing": missing,
                          "data": {k: _iso_or_same(v) for k, v in d.items()}},
                         ensure_ascii=False
                     ) + "\n")
@@ -375,12 +371,14 @@ def run_trojmiasto_detail(
                     fail += 1
                     log.warning("detail_incomplete_skip", extra={"extra": {"source": "trojmiasto", "url": u, "missing": missing}})
                     continue
-                
-                # Walidacja Pydantic
+
+                # Walidacja typów/zakresów
                 Offer(**d)
-                batch.append(d)
+
+                # PROJEKCJA → zapisujemy tylko docelowy schemat kolumn
+                batch.append(_project_offer_row(d))
                 ok += 1
-            
+
             except ValidationError as e:
                 fail += 1
                 if dump_debug:
@@ -390,27 +388,20 @@ def run_trojmiasto_detail(
                 if dump_debug:
                     log.warning("detail_parse_fail", extra={"extra": {"source": "trojmiasto", "url": u, "err": type(e).__name__}})
 
-            # Krok 3: Zapis wsadowy (logika z run_gratka_detail)
+            # zapis wsadowy co 50
             if len(batch) >= 50:
                 out_csv = offers_csv_path(out_dir)
-                for row in batch:
-                    row.pop("first_seen", None)
-                    row.pop("last_seen", None)
-                    append_offer_row(out_csv, row)
+                append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
                 batch.clear()
 
-        # Krok 4: Zapisz resztę z batcha
+        # flush końcowy
         if batch:
             out_csv = offers_csv_path(out_dir)
-            for row in batch:
-                row.pop("first_seen", None)
-                row.pop("last_seen", None)
-                append_offer_row(out_csv, row)
+            append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
             batch.clear()
 
         log.info("detail_done", extra={"extra": {"source": "trojmiasto", "ok": ok, "fail": fail, "out": str(offers_csv_path(out_dir))}})
         return {"offers_ok": ok, "offers_fail": fail}
-    
     finally:
         http.close()
         if dbg:
