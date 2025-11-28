@@ -464,10 +464,6 @@ class OtodomAdapter(BaseAdapter):
             url = _build_listing_url(city, deal, kind, page)
             try:
                 resp = self.http.get(url, accept="text/html")
-                
-                # Zapisz HTML do pliku, aby go sprawdzić
-                with open(f"debug_strona_{page}.html", "w", encoding="utf-8") as f:
-                    f.write(resp.text)
             
                 s = soup(resp.text)
 

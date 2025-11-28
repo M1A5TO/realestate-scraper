@@ -11,6 +11,7 @@ class HttpCfg(BaseModel):
     timeout_s: int = Field(default=20, ge=1, le=120)
     http_proxy: str | None = None
     https_proxy: str | None = None
+    api_url: str = "http://localhost:8080"
 
 class IoCfg(BaseModel):
     out_dir: Path = Path("./data/out")
@@ -44,6 +45,7 @@ def load_settings() -> Settings:
             timeout_s=int(os.getenv("HTTP_TIMEOUT_S", HttpCfg().timeout_s)),
             http_proxy=os.getenv("HTTP_PROXY") or None,
             https_proxy=os.getenv("HTTPS_PROXY") or None,
+            api_url=os.getenv("API_URL", "http://localhost:8080"),
         ),
         io=IoCfg(
             out_dir=Path(os.getenv("OUT_DIR", IoCfg().out_dir)),
