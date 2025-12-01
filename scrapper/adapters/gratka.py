@@ -561,7 +561,7 @@ class GratkaAdapter(BaseAdapter):
             kept = 0
             for href in links:
                 m = re.search(r"/ob/(\d+)", href)
-                offer_id = f"gratka-{m.group(1)}" if m else ""
+                offer_id = f"{m.group(1)}" if m else ""
                 if offer_id and offer_id in dedup:
                     continue
                 dedup.add(offer_id or href)

@@ -20,6 +20,8 @@ from scrapper.core.storage import urls_csv_path, offers_csv_path, photos_csv_pat
 from scrapper.core.http import HttpClient
 from scrapper.adapters.morizon import MorizonAdapter
 
+from scrapper.pipelines.stream import run_otodom_stream
+
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
 otodom = typer.Typer(help="Operacje dla źródła: Otodom", rich_markup_mode=None)
@@ -154,6 +156,32 @@ def otodom_full_cmd(
         https_proxy=cfg.http.https_proxy,
     )
     typer.echo(st)
+
+@otodom.command("live")
+def otodom_live(
+    pages: int = 1,
+    city: Optional[str] = None,
+    deal: Optional[str] = None,
+    kind: Optional[str] = None,
+):
+    """
+    Uruchamia scrapper Otodom w trybie LIVE (Stream).
+    Bez plików CSV. Prosto do bazy + zdjęcia.
+    """
+    cfg = load_settings()
+    
+    # Uruchamiamy pipeline strumieniowy
+    run_otodom_stream(
+        city=city or cfg.defaults.city,
+        deal=deal or cfg.defaults.deal,
+        kind=kind or cfg.defaults.kind,
+        max_pages=pages,
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
 
 # ---------------- MORIZON ----------------
 

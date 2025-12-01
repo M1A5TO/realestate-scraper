@@ -139,7 +139,8 @@ class BackendClient:
         try:
             resp = requests.post(url, json=payload, timeout=5)
             if resp.status_code in (200, 201):
-                return True
+                #wyciągamy id nadane od bazy do mieszkania
+                return int(resp.json().get("id"))
             else:
                 log.warning("backend_create_fail", extra={"status": resp.status_code, "msg": resp.text})
                 return False
@@ -148,10 +149,26 @@ class BackendClient:
             return False
 
     def upload_photo(self, apartment_id: int, photo_url: str) -> bool:
+        """
+        Wysyła LINK do zdjęcia (backend sam je sobie pobierze lub zapisze URL).
+        """
         url = f"{self.api_url}/photos"
-        payload = {"url": photo_url, "apartment_id": apartment_id}
+        
+        # Nowy, lekki payload
+        payload = {
+            "apartment_id": apartment_id,
+            "url": photo_url
+        }
+
         try:
+            # Zmieniamy data/files na json!
             resp = requests.post(url, json=payload, timeout=5)
-            return resp.status_code == 201
-        except Exception:
+            
+            if resp.status_code in (200, 201):
+                return True
+            else:
+                log.warning("photo_link_send_fail", extra={"status": resp.status_code, "msg": resp.text})
+                return False
+        except Exception as e:
+            log.error("photo_link_send_error", extra={"error": str(e)})
             return False
