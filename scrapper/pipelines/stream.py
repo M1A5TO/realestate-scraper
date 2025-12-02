@@ -41,6 +41,11 @@ def process_single_offer(url: str, adapter, backend, log, save_html: bool = Fals
 
         # 1. Pobierz szczegóły (Detail)
         data = adapter.parse_offer(url)
+        # Szybka weryfikacja ---
+        if not data.get('lat') or not data.get('lon'):
+            log.warning("stream_skip_no_geo", extra={"offer_id": data.get("offer_id")})
+            return # Przerywamy, szkoda czasu na pytanie backendu
+        # ------------------------------------
         offer_id = data.get("offer_id", "unknown")
         
         # Walidacja (Pydantic)

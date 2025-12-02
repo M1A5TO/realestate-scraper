@@ -657,7 +657,7 @@ def _extract_offer_links_from_listing(html: str, city_name: str) -> list[str]:
     uniq, seen = [], set()
     for u in links:
         m = re.search(r"/ob/(\d+)", u)
-        key = f"gratka-{m.group(1)}" if m else u
+        key = f"{m.group(1)}" if m else u
         if key in seen:
             continue
         seen.add(key)
@@ -887,13 +887,23 @@ class GratkaAdapter(BaseAdapter):
                         urls.append(normalize_url(join_url("https://gratka.pl", best)))
 
         # deduplikacja z zachowaniem kolejności
+        # deduplikacja z zachowaniem kolejności
         seen = set()
-        out: list[str] = []
+        out = []  # Tu będą słowniki
+        seq = 0
+        
         for u in urls:
             if u in seen:
                 continue
             seen.add(u)
-            out.append(u)
+            
+            # --- ZMIANA: Pakujemy w słownik, żeby stream.py nie krzyczał ---
+            out.append({
+                "url": u,
+                "seq": seq
+            })
+            seq += 1
+            
         return out
 
 
