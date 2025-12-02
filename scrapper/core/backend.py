@@ -142,6 +142,10 @@ class BackendClient:
                 #wyciągamy id nadane od bazy do mieszkania
                 return int(resp.json().get("id"))
             else:
+                # --- DEBUG START ---
+                print(f"\n[DEBUG ERROR 422] Payload: {payload}")
+                print(f"[DEBUG MSG] Odpowiedź: {resp.text}\n")
+                # --- DEBUG END ---
                 log.warning("backend_create_fail", extra={"status": resp.status_code, "msg": resp.text})
                 return False
         except Exception as e:

@@ -20,7 +20,12 @@ from scrapper.core.storage import urls_csv_path, offers_csv_path, photos_csv_pat
 from scrapper.core.http import HttpClient
 from scrapper.adapters.morizon import MorizonAdapter
 
-from scrapper.pipelines.stream import run_otodom_stream
+from scrapper.pipelines.stream import (
+    run_otodom_stream, 
+    run_morizon_stream, 
+    run_gratka_stream, 
+    run_trojmiasto_stream
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
@@ -345,6 +350,27 @@ def morizon_full_cmd(
     )
     typer.echo(st)
 
+@morizon.command("live")
+def morizon_live(
+    pages: int = 1,
+    city: Optional[str] = None,
+    deal: Optional[str] = None,
+    kind: Optional[str] = None,
+):
+    """Live stream dla Morizon."""
+    cfg = load_settings()
+    run_morizon_stream(
+        city=city or cfg.defaults.city,
+        deal=deal or cfg.defaults.deal,
+        kind=kind or cfg.defaults.kind,
+        max_pages=pages,
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
+
 # ---------------- GRATKA ----------------
 
 @gratka.command("discover")
@@ -470,6 +496,30 @@ def gratka_full_cmd(
         https_proxy=cfg.http.https_proxy,
     )
     typer.echo(json.dumps(st, ensure_ascii=False))
+
+@gratka.command("live")
+def gratka_live(
+    pages: int = 1,
+    city: Optional[str] = None,
+    deal: Optional[str] = None,
+    kind: Optional[str] = None,
+):
+    """
+    Uruchamia scrapper Gratka w trybie LIVE (Stream).
+    """
+    cfg = load_settings()
+    
+    run_gratka_stream(
+        city=city or cfg.defaults.city,
+        deal=deal or cfg.defaults.deal,
+        kind=kind or cfg.defaults.kind,
+        max_pages=pages,
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
 
 # ---------------- TROJMIASTO ----------------
 
@@ -597,5 +647,31 @@ def trojmiasto_full_cmd(
     )
     typer.echo(json.dumps(st, ensure_ascii=False))
 
+@trojmiasto.command("live")
+def trojmiasto_live(
+    pages: int = 1,
+    city: Optional[str] = None,
+    deal: Optional[str] = None,
+    kind: Optional[str] = None,
+):
+    """
+    Uruchamia scrapper Trojmiasto.pl w trybie LIVE (Stream).
+    """
+    cfg = load_settings()
+    
+    run_trojmiasto_stream(
+        city=city or cfg.defaults.city,
+        deal=deal or cfg.defaults.deal,
+        kind=kind or cfg.defaults.kind,
+        max_pages=pages,
+        user_agent=cfg.http.user_agent,
+        timeout_s=cfg.http.timeout_s,
+        rps=cfg.http.rate_limit_rps,
+        http_proxy=cfg.http.http_proxy,
+        https_proxy=cfg.http.https_proxy,
+    )
+
 if __name__ == "__main__":
     app()
+
+

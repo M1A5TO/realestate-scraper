@@ -9,6 +9,9 @@ from scrapper.core.validate import Offer
 
 # Import adaptera Otodom
 from scrapper.adapters.otodom import OtodomAdapter
+from scrapper.adapters.morizon import MorizonAdapter
+from scrapper.adapters.gratka import GratkaAdapter
+from scrapper.adapters.trojmiasto import TrojmiastoAdapter
 
 def process_single_offer(url: str, adapter, backend, log, save_html: bool = False):
     """
@@ -135,9 +138,165 @@ def run_otodom_stream(
                     continue
                 
                 # Uruchamiamy z flagą zapisu HTML!
-                process_single_offer(url, adapter, backend, log, save_html=True)
+                process_single_offer(url, adapter, backend, log, save_html=False)
                 
             break
+
+    finally:
+        http.close()
+
+def run_morizon_stream(
+    *,
+    city: str,
+    deal: str,
+    kind: str,
+    max_pages: int,
+    user_agent: str,
+    timeout_s: int,
+    rps: float,
+    http_proxy: str | None = None,
+    https_proxy: str | None = None,
+):
+    """Główna pętla strumieniowa dla Morizon."""
+    log = setup_json_logger()
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
+    
+    http = HttpClient(
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    
+    try:
+        # ZMIANA ADAPTERA TUTAJ:
+        adapter = MorizonAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
+
+        for page in range(1, max_pages + 1):
+            log.info("stream_page_start", extra={"page": page, "source": "morizon"})
+            
+            # Parametry discover mogą się różnić w zależności od adaptera!
+            # Morizon/Gratka/Trojmiasto też przyjmują city, deal, kind, max_pages
+            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
+            
+            log.info("stream_discovered_rows", extra={"count": "generator"}) # Pamiętaj o generatorze!
+
+            for row in rows:
+                url = row.get('url') or row.get('offer_url')
+                if not url: continue
+                
+                # Używamy tej samej uniwersalnej funkcji process_single_offer!
+                process_single_offer(url, adapter, backend, log, save_html=False) # save_html=False dla produkcji
+            break 
+    finally:
+        http.close()
+
+def run_gratka_stream(
+    *,
+    city: str,
+    deal: str,
+    kind: str,
+    max_pages: int,
+    user_agent: str,
+    timeout_s: int,
+    rps: float,
+    http_proxy: str | None = None,
+    https_proxy: str | None = None,
+):
+    """
+    Główna pętla strumieniowa dla Gratka.pl.
+    """
+    log = setup_json_logger()
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
+    
+    http = HttpClient(
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    
+    try:
+        # GratkaAdapter wymaga out_dir (choćby do cache'owania)
+        adapter = GratkaAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
+
+        for page in range(1, max_pages + 1):
+            log.info("stream_page_start", extra={"page": page, "source": "gratka"})
+            
+            # Pobieramy linki (GratkaAdapter obsługuje te same parametry)
+            # Uwaga: Gratka może zwracać generator, więc rzutujemy na listę dla bezpieczeństwa
+            # lub iterujemy bezpośrednio.
+            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
+            
+            log.info("stream_start_processing_rows", extra={"source": "gratka"})
+
+            for row in rows:
+                url = row.get('url') or row.get('offer_url')
+                
+                if not url:
+                    log.warning("stream_missing_url", extra={"row": row})
+                    continue
+                
+                # Używamy uniwersalnej funkcji przetwarzania (tej samej co dla Otodom!)
+                process_single_offer(url, adapter, backend, log, save_html=False)
+                
+            # Adapter Gratki w discover() też iteruje po stronach, więc jedna iteracja wystarczy
+            break 
+
+    finally:
+        http.close()
+
+def run_trojmiasto_stream(
+    *,
+    city: str,
+    deal: str,
+    kind: str,
+    max_pages: int,
+    user_agent: str,
+    timeout_s: int,
+    rps: float,
+    http_proxy: str | None = None,
+    https_proxy: str | None = None,
+):
+    """
+    Główna pętla strumieniowa dla Trojmiasto.pl.
+    """
+    log = setup_json_logger()
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
+    
+    http = HttpClient(
+        user_agent=user_agent,
+        timeout_s=timeout_s,
+        rps=rps,
+        proxies=build_proxies(http_proxy, https_proxy),
+    )
+    
+    try:
+        # TrojmiastoAdapter też wymaga out_dir
+        adapter = TrojmiastoAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
+
+        for page in range(1, max_pages + 1):
+            log.info("stream_page_start", extra={"page": page, "source": "trojmiasto"})
+            
+            # Pobieranie linków
+            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
+            
+            log.info("stream_start_processing_rows", extra={"source": "trojmiasto"})
+
+            for row in rows:
+                url = row.get('url') or row.get('offer_url')
+                
+                if not url:
+                    log.warning("stream_missing_url", extra={"row": row})
+                    continue
+                
+                # Przetwarzanie oferty (pobranie -> backend -> zdjęcia)
+                process_single_offer(url, adapter, backend, log, save_html=False)
+                
+            break 
 
     finally:
         http.close()
