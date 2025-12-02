@@ -354,18 +354,54 @@ def _price_from_nodes(soup_obj) -> tuple[Optional[float], Optional[float], Optio
 
 
 def _area_rooms_from_nodes(soup_obj) -> tuple[Optional[float], Optional[float]]:
-    # wg prompt: data-cy="detailsRowTextNumberOfRooms", data-cy="detailsRowTextArea"
+    """
+    Spróbuj wyciągnąć powierzchnię i liczbę pokoi:
+    1) ze starych pól [data-cy='detailsRowTextNumberOfRooms'] / [data-cy='detailsRowTextArea']
+    2) z nowego bloku .details-highlighted-parameters__item (Pokoje / Powierzchnia)
+    """
+    rooms: Optional[float] = None
+    area: Optional[float] = None
+
+    # --- 1) Stare selektory data-cy (dla kompatybilności) ---
     rooms_txt = select_text(soup_obj, "[data-cy='detailsRowTextNumberOfRooms']")
     area_txt  = select_text(soup_obj, "[data-cy='detailsRowTextArea']")
-    rooms = None; area = None
+
     if rooms_txt:
         m = re.search(r"(\d+)", rooms_txt)
         if m:
             rooms = _coerce_float(m.group(1))
+
     if area_txt:
-        m = re.search(r"([\d\s.,]+)\s*m", area_txt)
-        if m:
-            area = _coerce_float(m.group(1))
+        # użyj helpera, który radzi sobie z przecinkami/spacjami
+        a = only_digits_float(area_txt)
+        if a is not None:
+            area = a
+
+    # --- 2) Nowy layout: "highlighted parameters" ---
+    # <div class="details-highlighted-parameters__item-label">Pokoje</div>
+    # <div class="details-highlighted-parameters__item-value"><strong>4</strong></div>
+    if rooms is None or area is None:
+        for item in soup_obj.select(".details-highlighted-parameters__item"):
+            label_el = item.select_one(".details-highlighted-parameters__item-label")
+            value_el = item.select_one(".details-highlighted-parameters__item-value")
+            if not (label_el and value_el):
+                continue
+
+            label = (label_el.get_text(" ", strip=True) or "").lower()
+            value = value_el.get_text(" ", strip=True) or ""
+
+            # Liczba pokoi
+            if rooms is None and "pokoj" in label:
+                m = re.search(r"(\d+)", value)
+                if m:
+                    rooms = _coerce_float(m.group(1))
+
+            # Powierzchnia (np. "71,31 m² + balkon 3,62 m²")
+            if area is None and ("powierzchnia" in label or "m²" in value.lower()):
+                a = only_digits_float(value)
+                if a is not None:
+                    area = a
+
     return area, rooms
 
 def _clean_street(s: str | None) -> str | None:
