@@ -66,16 +66,26 @@ def process_single_offer(url: str, adapter, backend, log, save_html: bool = Fals
         try:
             photos = adapter.parse_photos(url)
             uploaded_count = 0
+
+            # Print diagnostyczny
+            print(f"\n--- DEBUG PHOTOS: Znaleziono {len(photos)} zdjęć dla {offer_id} ---")
+
             # Limit 10 zdjęć na ofertę dla testów
             for photo_meta in photos: 
-                if backend.upload_photo(db_id, photo_meta['url']):
+                # Tu wywołujemy backend (diagnostyczny)
+                success = backend.upload_photo(db_id, photo_meta['url'])
+                if success:
                     uploaded_count += 1
+                else:
+                    print(f"--- DEBUG: Błąd wysyłania zdjęcia: {photo_meta['url']}")
             
             log.info("stream_photos_done", extra={"db_id": db_id, "count": uploaded_count})
 
         except Exception as e:
+            # TO JEST NAJWAŻNIEJSZE - wypisz pełny błąd(diagnostyczny)
+            import traceback
+            traceback.print_exc()
             log.warning("stream_photos_fail", extra={"err": str(e), "offer_id": offer_id})
-
     except Exception as e:
         log.error("stream_offer_fail", extra={"url": url, "err": str(e)})
 

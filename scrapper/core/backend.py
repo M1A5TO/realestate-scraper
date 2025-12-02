@@ -150,25 +150,30 @@ class BackendClient:
 
     def upload_photo(self, apartment_id: int, photo_url: str) -> bool:
         """
-        Wysyła LINK do zdjęcia (backend sam je sobie pobierze lub zapisze URL).
+        Wysyła LINK do zdjęcia.
         """
         url = f"{self.api_url}/photos"
         
-        # Nowy, lekki payload
         payload = {
             "apartment_id": apartment_id,
-            "url": photo_url
+            "link": photo_url,
+            "style": "other"
         }
 
         try:
-            # Zmieniamy data/files na json!
             resp = requests.post(url, json=payload, timeout=5)
             
             if resp.status_code in (200, 201):
                 return True
             else:
-                log.warning("photo_link_send_fail", extra={"status": resp.status_code, "msg": resp.text})
+                # --- DEBUG START (Dodaj to!) ---
+                print(f"\n[DEBUG ERROR] Kod: {resp.status_code}")
+                print(f"[DEBUG RESP] Treść: {resp.text}")
+                print(f"[DEBUG PAYLOAD] Wysyłane dane: {payload}\n")
+                # --- DEBUG END ---
+                
+                log.warning("photo_send_fail", extra={"status": resp.status_code, "msg": resp.text})
                 return False
         except Exception as e:
-            log.error("photo_link_send_error", extra={"error": str(e)})
+            log.error("photo_send_error", extra={"error": str(e)})
             return False
