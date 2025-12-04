@@ -355,18 +355,26 @@ def morizon_full_cmd(
 
 @morizon.command("live")
 def morizon_live(
-    pages: int = 1,
-    city: Optional[str] = None,
+    limit: Optional[int] = None,  # Opcjonalny limit ofert
+    city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
     deal: Optional[str] = None,
     kind: Optional[str] = None,
 ):
-    """Live stream dla Morizon."""
+    """
+    Tryb LIVE: Pobiera oferty z Otodom.
+    Brak --city = Cała Polska.
+    Brak --limit = Nieskończoność.
+    """
     cfg = load_settings()
+    
+    # Jeśli user nie podał miasta, przekazujemy None (Adapter obsłuży to jako 'cala-polska')
+    target_city = city 
+
     run_morizon_stream(
-        city=city or cfg.defaults.city,
+        city=target_city,
         deal=deal or cfg.defaults.deal,
         kind=kind or cfg.defaults.kind,
-        max_pages=pages,
+        limit=limit,
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
         rps=cfg.http.rate_limit_rps,
@@ -502,21 +510,26 @@ def gratka_full_cmd(
 
 @gratka.command("live")
 def gratka_live(
-    pages: int = 1,
-    city: Optional[str] = None,
+    limit: Optional[int] = None,  # Opcjonalny limit ofert
+    city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
     deal: Optional[str] = None,
     kind: Optional[str] = None,
 ):
     """
-    Uruchamia scrapper Gratka w trybie LIVE (Stream).
+    Tryb LIVE: Pobiera oferty z Otodom.
+    Brak --city = Cała Polska.
+    Brak --limit = Nieskończoność.
     """
     cfg = load_settings()
     
+    # Jeśli user nie podał miasta, przekazujemy None (Adapter obsłuży to jako 'cala-polska')
+    target_city = city 
+
     run_gratka_stream(
-        city=city or cfg.defaults.city,
+        city=target_city,
         deal=deal or cfg.defaults.deal,
         kind=kind or cfg.defaults.kind,
-        max_pages=pages,
+        limit=limit,
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
         rps=cfg.http.rate_limit_rps,
@@ -652,21 +665,26 @@ def trojmiasto_full_cmd(
 
 @trojmiasto.command("live")
 def trojmiasto_live(
-    pages: int = 1,
-    city: Optional[str] = None,
+    limit: Optional[int] = None,  # Opcjonalny limit ofert
+    city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
     deal: Optional[str] = None,
     kind: Optional[str] = None,
 ):
     """
-    Uruchamia scrapper Trojmiasto.pl w trybie LIVE (Stream).
+    Tryb LIVE: Pobiera oferty z Otodom.
+    Brak --city = Cała Polska.
+    Brak --limit = Nieskończoność.
     """
     cfg = load_settings()
     
+    # Jeśli user nie podał miasta, przekazujemy None (Adapter obsłuży to jako 'cala-polska')
+    target_city = city 
+
     run_trojmiasto_stream(
-        city=city or cfg.defaults.city,
+        city=target_city,
         deal=deal or cfg.defaults.deal,
         kind=kind or cfg.defaults.kind,
-        max_pages=pages,
+        limit=limit,
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
         rps=cfg.http.rate_limit_rps,

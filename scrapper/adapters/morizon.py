@@ -589,53 +589,86 @@ class MorizonAdapter(BaseAdapter):
 
         return data
 
-    def discover(self, city: str, deal: Optional[str], kind: Optional[str], max_pages: int = 1) -> list[OfferIndex]:
+    def discover(self, *, city: str | None = None, deal: str, kind: str, max_pages: int | None = None) -> Iterable[OfferIndex]:
         """
-        Prosty, stabilny listing:
-        https://www.morizon.pl/{kategoria}/{miasto}/?page=N
-        gdzie kategoria ∈ {mieszkania, domy, dzialki, lokale}.
-        Parametr 'deal' (sprzedaz/wynajem) zostawiamy na później – na wielu listingach
-        sprzedaz jest domyślna, a oferty i tak mają w URL 'sprzedaz-...'.
+        Pobiera linki w trybie ciągłym.
+        city=None -> Cała Polska.
+        max_pages=None -> Do końca wyników.
         """
         assert self.http is not None
-        rows: list[OfferIndex] = []
         dedup_ids: set[str] = set()
 
-        category = _category_from_kind(kind)
-        city_slug = urllib.parse.quote((city or "").strip().lower().replace(" ", "-"))
+        # Mapowanie kategorii
+        category_map = {
+            "mieszkanie": "mieszkania", "mieszkania": "mieszkania",
+            "dom": "domy", "domy": "domy",
+            "dzialka": "dzialki", "dzialki": "dzialki",
+            "lokal": "lokale", "lokale": "lokale"
+        }
+        category = category_map.get((kind or "").lower(), "mieszkania")
 
-        for page in range(1, int(max_pages) + 1):
-            url = f"https://www.morizon.pl/{category}/{city_slug}/?page={page}"
+        # Konstrukcja bazowego URL
+        if city:
+            # np. gdansk
+            city_slug = urllib.parse.quote(city.strip().lower().replace(" ", "-"))
+            # Główny: https://www.morizon.pl/mieszkania/gdansk/
+            base_url = f"https://www.morizon.pl/{category}/{city_slug}/"
+            # Zapasowy: https://www.morizon.pl/nieruchomosci/mieszkania/gdansk/
+            alt_base_url = f"https://www.morizon.pl/nieruchomosci/{category}/{city_slug}/"
+        else:
+            # Cała Polska: https://www.morizon.pl/mieszkania/
+            base_url = f"https://www.morizon.pl/{category}/"
+            alt_base_url = f"https://www.morizon.pl/nieruchomosci/{category}/"
+
+        page = 1
+        while True:
+            # 1. Sprawdź limit stron
+            if max_pages is not None and page > max_pages:
+                break
+
+            url = f"{base_url}?page={page}"
             try:
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": url, "err": type(e).__name__}})
-                continue
+                break
 
             links = _extract_offer_links(html)
+            
+            # Fallback - jeśli główny URL nie zwrócił linków, próbujemy alternatywnego
             if not links:
-                # Spróbuj alternatywnego wejścia (np. /nieruchomosci/{kategoria}/{miasto}/?page=N)
-                alt = f"https://www.morizon.pl/nieruchomosci/{category}/{city_slug}/?page={page}"
+                alt_url = f"{alt_base_url}?page={page}"
                 try:
-                    html2 = self.http.get(alt, accept="text/html").text
+                    html2 = self.http.get(alt_url, accept="text/html").text
                     links = _extract_offer_links(html2)
                 except Exception:
-                    links = []
+                    pass # Jeśli też błąd, links pozostaje puste
 
+            # --- AUTO-STOP ---
+            if not links:
+                log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                break
+
+            yielded_count = 0
             for href in links:
                 oid = _offer_id_from_url(href)
+                
+                # Deduplikacja
                 if not oid or oid in dedup_ids:
                     continue
                 dedup_ids.add(oid)
-                rows.append({
+                
+                # Yield (Wypluwamy wynik)
+                yield {
                     "offer_url": normalize_url(href),
                     "offer_id": oid,
                     "page_idx": page,
-                })
+                    "source": self.source
+                }
+                yielded_count += 1
 
-            log.info("discover_page", extra={"extra": {"page": page, "found": len(links), "kept": len(rows)}})
-
-        return rows
+            log.info("discover_page_done", extra={"extra": {"page": page, "found": len(links), "new": yielded_count}})
+            page += 1
     
     def with_deps(self, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http

@@ -154,17 +154,19 @@ def run_otodom_stream(
 
 def run_morizon_stream(
     *,
-    city: str,
+    city: str | None,       # Może być None (Cała Polska)
     deal: str,
     kind: str,
-    max_pages: int,
+    limit: int | None,      # Limit OFERT (a nie stron)
     user_agent: str,
     timeout_s: int,
     rps: float,
     http_proxy: str | None = None,
     https_proxy: str | None = None,
 ):
-    """Główna pętla strumieniowa dla Morizon."""
+    """
+    Główna pętla strumieniowa dla Otodom.
+    """
     log = setup_json_logger()
     cfg = load_settings()
     backend = BackendClient(api_url=cfg.http.api_url)
@@ -177,34 +179,39 @@ def run_morizon_stream(
     )
     
     try:
-        # ZMIANA ADAPTERA TUTAJ:
         adapter = MorizonAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
 
-        for page in range(1, max_pages + 1):
-            log.info("stream_page_start", extra={"page": page, "source": "morizon"})
-            
-            # Parametry discover mogą się różnić w zależności od adaptera!
-            # Morizon/Gratka/Trojmiasto też przyjmują city, deal, kind, max_pages
-            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
-            
-            log.info("stream_discovered_rows", extra={"count": "generator"}) # Pamiętaj o generatorze!
+        log.info("stream_start", extra={"source": "otodom", "city": city, "limit": limit})
+        
+        # Wywołujemy discover z max_pages=None (nieskończoność), sterujemy limitem ofert w pętli
+        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=None)
+        
+        processed_count = 0
 
-            for row in rows:
-                url = row.get('url') or row.get('offer_url')
-                if not url: continue
-                
-                # Używamy tej samej uniwersalnej funkcji process_single_offer!
-                process_single_offer(url, adapter, backend, log, save_html=False) # save_html=False dla produkcji
-            break 
+        for row in rows:
+            # --- HAMULEC (Limit Ofert) ---
+            if limit is not None and processed_count >= limit:
+                log.info("stream_limit_reached", extra={"limit": limit})
+                break
+            # -----------------------------
+
+            url = row.get('url') or row.get('offer_url')
+            if not url: continue
+            
+            # Przetwarzanie jednej oferty
+            process_single_offer(url, adapter, backend, log, save_html=False)
+            
+            processed_count += 1
+
     finally:
         http.close()
 
 def run_gratka_stream(
     *,
-    city: str,
+    city: str | None,       # Może być None (Cała Polska)
     deal: str,
     kind: str,
-    max_pages: int,
+    limit: int | None,      # Limit OFERT (a nie stron)
     user_agent: str,
     timeout_s: int,
     rps: float,
@@ -212,7 +219,7 @@ def run_gratka_stream(
     https_proxy: str | None = None,
 ):
     """
-    Główna pętla strumieniowa dla Gratka.pl.
+    Główna pętla strumieniowa dla Otodom.
     """
     log = setup_json_logger()
     cfg = load_settings()
@@ -226,41 +233,39 @@ def run_gratka_stream(
     )
     
     try:
-        # GratkaAdapter wymaga out_dir (choćby do cache'owania)
         adapter = GratkaAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
 
-        for page in range(1, max_pages + 1):
-            log.info("stream_page_start", extra={"page": page, "source": "gratka"})
-            
-            # Pobieramy linki (GratkaAdapter obsługuje te same parametry)
-            # Uwaga: Gratka może zwracać generator, więc rzutujemy na listę dla bezpieczeństwa
-            # lub iterujemy bezpośrednio.
-            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
-            
-            log.info("stream_start_processing_rows", extra={"source": "gratka"})
+        log.info("stream_start", extra={"source": "otodom", "city": city, "limit": limit})
+        
+        # Wywołujemy discover z max_pages=None (nieskończoność), sterujemy limitem ofert w pętli
+        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=None)
+        
+        processed_count = 0
 
-            for row in rows:
-                url = row.get('url') or row.get('offer_url')
-                
-                if not url:
-                    log.warning("stream_missing_url", extra={"row": row})
-                    continue
-                
-                # Używamy uniwersalnej funkcji przetwarzania (tej samej co dla Otodom!)
-                process_single_offer(url, adapter, backend, log, save_html=False)
-                
-            # Adapter Gratki w discover() też iteruje po stronach, więc jedna iteracja wystarczy
-            break 
+        for row in rows:
+            # --- HAMULEC (Limit Ofert) ---
+            if limit is not None and processed_count >= limit:
+                log.info("stream_limit_reached", extra={"limit": limit})
+                break
+            # -----------------------------
+
+            url = row.get('url') or row.get('offer_url')
+            if not url: continue
+            
+            # Przetwarzanie jednej oferty
+            process_single_offer(url, adapter, backend, log, save_html=False)
+            
+            processed_count += 1
 
     finally:
         http.close()
 
 def run_trojmiasto_stream(
     *,
-    city: str,
+    city: str | None,       # Może być None (Cała Polska)
     deal: str,
     kind: str,
-    max_pages: int,
+    limit: int | None,      # Limit OFERT (a nie stron)
     user_agent: str,
     timeout_s: int,
     rps: float,
@@ -268,7 +273,7 @@ def run_trojmiasto_stream(
     https_proxy: str | None = None,
 ):
     """
-    Główna pętla strumieniowa dla Trojmiasto.pl.
+    Główna pętla strumieniowa dla Otodom.
     """
     log = setup_json_logger()
     cfg = load_settings()
@@ -282,28 +287,29 @@ def run_trojmiasto_stream(
     )
     
     try:
-        # TrojmiastoAdapter też wymaga out_dir
         adapter = TrojmiastoAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
 
-        for page in range(1, max_pages + 1):
-            log.info("stream_page_start", extra={"page": page, "source": "trojmiasto"})
-            
-            # Pobieranie linków
-            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
-            
-            log.info("stream_start_processing_rows", extra={"source": "trojmiasto"})
+        log.info("stream_start", extra={"source": "otodom", "city": city, "limit": limit})
+        
+        # Wywołujemy discover z max_pages=None (nieskończoność), sterujemy limitem ofert w pętli
+        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=None)
+        
+        processed_count = 0
 
-            for row in rows:
-                url = row.get('url') or row.get('offer_url')
-                
-                if not url:
-                    log.warning("stream_missing_url", extra={"row": row})
-                    continue
-                
-                # Przetwarzanie oferty (pobranie -> backend -> zdjęcia)
-                process_single_offer(url, adapter, backend, log, save_html=False)
-                
-            break 
+        for row in rows:
+            # --- HAMULEC (Limit Ofert) ---
+            if limit is not None and processed_count >= limit:
+                log.info("stream_limit_reached", extra={"limit": limit})
+                break
+            # -----------------------------
+
+            url = row.get('url') or row.get('offer_url')
+            if not url: continue
+            
+            # Przetwarzanie jednej oferty
+            process_single_offer(url, adapter, backend, log, save_html=False)
+            
+            processed_count += 1
 
     finally:
         http.close()

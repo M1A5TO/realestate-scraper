@@ -690,12 +690,15 @@ class GratkaAdapter(BaseAdapter):
         return self
 
     # ---------- DISCOVER ----------
-    def discover(self, *, city: str, deal: str, kind: str, max_pages: int = 1) -> Iterable[OfferIndex]:
+    def discover(self, *, city: str | None = None, deal: str, kind: str, max_pages: int | None = None) -> Iterable[OfferIndex]:
+        """
+        Pobiera linki w trybie ciągłym.
+        city=None -> Cała Polska.
+        max_pages=None -> Do końca wyników.
+        """
         assert self.http is not None
-        rows: list[OfferIndex] = []
         dedup: set[str] = set()
 
-        # kategorie: "mieszkania", "domy", "dzialki", "lokale" → mapuj po Twojej logice
         kind_slug = {
             "mieszkania": "mieszkania",
             "mieszkanie": "mieszkania",
@@ -707,30 +710,56 @@ class GratkaAdapter(BaseAdapter):
             "lokal": "lokale",
         }.get((kind or "").lower(), "mieszkania")
 
-        city_slug = _slug(city)
+        # Budowa szablonu URL (z miastem lub bez)
+        if city:
+            # Zakładam, że funkcja _slug jest dostępna w pliku (była w Twoim kodzie)
+            city_slug = _slug(city)
+            url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}?page={{}}"
+        else:
+            # Wersja ogólnopolska
+            url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}?page={{}}"
 
-        for page in range(1, int(max_pages) + 1):
-            url = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}?page={page}"
+        page = 1
+        while True:
+            # 1. Sprawdź limit stron (jeśli podano)
+            if max_pages is not None and page > max_pages:
+                break
+
+            url = url_template.format(page)
             try:
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": url, "err": type(e).__name__}})
-                continue
+                break
 
-            links = _extract_offer_links_from_listing(html, city)
-            kept = 0
+            # Jeśli city=None, przekazujemy pusty string, żeby funkcja nie filtrowała po nazwie miasta
+            links = _extract_offer_links_from_listing(html, city if city else "")
+            
+            # --- AUTO-STOP ---
+            if not links:
+                log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                break
+
+            yielded_count = 0
             for href in links:
                 m = re.search(r"/ob/(\d+)", href)
                 offer_id = f"{m.group(1)}" if m else ""
+                
                 if offer_id and offer_id in dedup:
                     continue
                 dedup.add(offer_id or href)
-                rows.append({"offer_url": href, "offer_id": offer_id, "page_idx": page})
-                kept += 1
+                
+                # Yield zamiast append
+                yield {
+                    "offer_url": href,
+                    "offer_id": offer_id,
+                    "page_idx": page,
+                    "source": self.source
+                }
+                yielded_count += 1
 
-            log.info("discover_page", extra={"extra": {"page": page, "found": len(links), "kept": kept}})
-
-        return rows
+            log.info("discover_page_done", extra={"extra": {"page": page, "found": len(links), "new": yielded_count}})
+            page += 1
 
 
     def write_urls_csv(self, rows: Iterable[OfferIndex]) -> Path:
@@ -759,7 +788,7 @@ class GratkaAdapter(BaseAdapter):
         if not out.get("offer_id"):
             m = re.search(r"/ob/(\d+)", url)
             if m:
-                out["offer_id"] = f"gratka-{m.group(1)}"
+                out["offer_id"] = f"{m.group(1)}"
         # 1) LD+JSON
         for block in _extract_ld_json_blocks(html):
             d = _from_ld(block)
