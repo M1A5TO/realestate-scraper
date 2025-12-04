@@ -164,23 +164,26 @@ def otodom_full_cmd(
 
 @otodom.command("live")
 def otodom_live(
-    pages: int = 1,
-    city: Optional[str] = None,
+    limit: Optional[int] = None,  # Opcjonalny limit ofert
+    city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
     deal: Optional[str] = None,
     kind: Optional[str] = None,
 ):
     """
-    Uruchamia scrapper Otodom w trybie LIVE (Stream).
-    Bez plików CSV. Prosto do bazy + zdjęcia.
+    Tryb LIVE: Pobiera oferty z Otodom.
+    Brak --city = Cała Polska.
+    Brak --limit = Nieskończoność.
     """
     cfg = load_settings()
     
-    # Uruchamiamy pipeline strumieniowy
+    # Jeśli user nie podał miasta, przekazujemy None (Adapter obsłuży to jako 'cala-polska')
+    target_city = city 
+
     run_otodom_stream(
-        city=city or cfg.defaults.city,
+        city=target_city,
         deal=deal or cfg.defaults.deal,
         kind=kind or cfg.defaults.kind,
-        max_pages=pages,
+        limit=limit,
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
         rps=cfg.http.rate_limit_rps,

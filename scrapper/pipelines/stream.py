@@ -100,10 +100,10 @@ def process_single_offer(url: str, adapter, backend, log, save_html: bool = Fals
 
 def run_otodom_stream(
     *,
-    city: str,
+    city: str | None,       # Może być None (Cała Polska)
     deal: str,
     kind: str,
-    max_pages: int,
+    limit: int | None,      # Limit OFERT (a nie stron)
     user_agent: str,
     timeout_s: int,
     rps: float,
@@ -127,25 +127,27 @@ def run_otodom_stream(
     try:
         adapter = OtodomAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
 
-        for page in range(1, max_pages + 1):
-            log.info("stream_page_start", extra={"page": page, "source": "otodom"})
-            
-            # Pobieramy linki
-            rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
-            log.info("stream_start_processing_rows")
+        log.info("stream_start", extra={"source": "otodom", "city": city, "limit": limit})
+        
+        # Wywołujemy discover z max_pages=None (nieskończoność), sterujemy limitem ofert w pętli
+        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=None)
+        
+        processed_count = 0
 
-            for row in rows:
-                # --- POPRAWKA TUTAJ ---
-                url = row.get('url') or row.get('offer_url')
-                
-                if not url:
-                    log.warning("stream_missing_url", extra={"row": row})
-                    continue
-                
-                # Uruchamiamy z flagą zapisu HTML!
-                process_single_offer(url, adapter, backend, log, save_html=False)
-                
-            break
+        for row in rows:
+            # --- HAMULEC (Limit Ofert) ---
+            if limit is not None and processed_count >= limit:
+                log.info("stream_limit_reached", extra={"limit": limit})
+                break
+            # -----------------------------
+
+            url = row.get('url') or row.get('offer_url')
+            if not url: continue
+            
+            # Przetwarzanie jednej oferty
+            process_single_offer(url, adapter, backend, log, save_html=False)
+            
+            processed_count += 1
 
     finally:
         http.close()
