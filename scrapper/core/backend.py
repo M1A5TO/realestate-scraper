@@ -1,6 +1,9 @@
 import requests
 from typing import Optional, Dict, Any
 from scrapper.core.log import get_logger
+import pika
+import json
+import os
 
 log = get_logger("backend")
 
@@ -180,4 +183,52 @@ class BackendClient:
                 return False
         except Exception as e:
             log.error("photo_send_error", extra={"error": str(e)})
+            return False
+        
+    def send_notification(self, apartment_id: int) -> bool:
+        """
+        Wysyła powiadomienie do RabbitMQ, że oferta jest gotowa do przetworzenia przez SI.
+        Kolejka: 'scraper_new_offers' (zgodnie z Twoim schematem).
+        """
+        # Konfiguracja połączenia (zakładamy domyślne dla Dockera na localhost)
+        mq_host = os.getenv("RABBITMQ_HOST", "localhost")
+        mq_port = int(os.getenv("RABBITMQ_PORT", 5672))
+        mq_user = os.getenv("RABBITMQ_DEFAULT_USER", "rabbit_user") # Z twojego .env
+        mq_pass = os.getenv("RABBITMQ_DEFAULT_PASS", "ChangeMeRabbit!") # Z twojego .env
+        queue_name = "scraper_new_offers"
+
+        try:
+            credentials = pika.PlainCredentials(mq_user, mq_pass)
+            parameters = pika.ConnectionParameters(host=mq_host, port=mq_port, credentials=credentials)
+            connection = pika.BlockingConnection(parameters)
+            channel = connection.channel()
+
+            # Deklarujemy kolejkę (żeby mieć pewność, że istnieje)
+            channel.queue_declare(queue=queue_name, durable=True)
+
+            # Wiadomość dla modułów SI
+            message = {
+                "apartment_id": apartment_id,
+                "action": "process_new_apartment"
+            }
+
+            channel.basic_publish(
+                exchange='',
+                routing_key=queue_name,
+                body=json.dumps(message),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # Wiadomość trwała (nie zniknie przy restarcie)
+                )
+            )
+            
+            connection.close()
+            return True
+            
+        except Exception as e:
+            # --- DODAJ TE DWIE LINIKI ---
+            print(f"\n[RABBITMQ DEBUG] BŁĄD: {type(e).__name__}")
+            print(f"[RABBITMQ DEBUG] TREŚĆ: {str(e)}\n")
+            # -----------------------------
+            
+            log.error("rabbitmq_send_error", extra={"error": str(e), "apartment_id": apartment_id})
             return False

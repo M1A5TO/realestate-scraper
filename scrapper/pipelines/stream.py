@@ -88,6 +88,13 @@ def process_single_offer(url: str, adapter, backend, log, save_html: bool = Fals
                     print(f"--- DEBUG: Błąd wysyłania zdjęcia: {photo_meta['url']}")
             
             log.info("stream_photos_done", extra={"db_id": db_id, "count": uploaded_count})
+            # --- KROK 5: POWIADOMIENIE RABBITMQ (NOWE) ---
+            # Wysyłamy TYLKO jeśli udało się utworzyć ofertę.
+            # Niezależnie czy zdjęcia weszły wszystkie czy połowa - oferta jest gotowa do analizy.
+            if backend.send_notification(db_id):
+                log.info("stream_rabbitmq_sent", extra={"db_id": db_id, "queue": "SI_queue"})
+            else:
+                log.warning("stream_rabbitmq_fail", extra={"db_id": db_id})
 
         except Exception as e:
             # TO JEST NAJWAŻNIEJSZE - wypisz pełny błąd(diagnostyczny)
