@@ -24,6 +24,7 @@ def main() -> int:
         params["min_footage"] = float(MIN_FOOTAGE)
 
     r = requests.get(f"{API_URL}/apartments", params=params, timeout=15)
+    # r = requests.get(f"{API_URL}/photos", params=params, timeout=15)
     r.raise_for_status()
 
     data = r.json()
