@@ -191,7 +191,8 @@ class BackendClient:
         Kolejka: 'scraper_new_offers' (zgodnie z Twoim schematem).
         """
         # Konfiguracja połączenia (zakładamy domyślne dla Dockera na localhost)
-        mq_host = os.getenv("RABBITMQ_HOST", "100.91.76.83")
+        # mq_host = os.getenv("RABBITMQ_HOST", "100.91.76.83")
+        mq_host = os.getenv("RABBITMQ_HOST", "localhost")
         mq_port = int(os.getenv("RABBITMQ_PORT", 5672))
         mq_user = os.getenv("RABBITMQ_DEFAULT_USER", "rabbit_user") # Z twojego .env
         mq_pass = os.getenv("RABBITMQ_DEFAULT_PASS", "ChangeMeRabbit!") # Z twojego .env
