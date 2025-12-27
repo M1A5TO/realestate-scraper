@@ -597,7 +597,7 @@ class MorizonAdapter(BaseAdapter):
         """
         assert self.http is not None
         dedup_ids: set[str] = set()
-
+        no_new_pages = 0
         # Mapowanie kategorii
         category_map = {
             "mieszkanie": "mieszkania", "mieszkania": "mieszkania",
@@ -624,6 +624,10 @@ class MorizonAdapter(BaseAdapter):
         while True:
             # 1. Sprawdź limit stron
             if max_pages is not None and page > max_pages:
+                log.info(
+                    "discover_stop_max_pages",
+                    extra={"extra": {"page": page}},
+                )
                 break
 
             url = f"{base_url}?page={page}"
@@ -649,27 +653,46 @@ class MorizonAdapter(BaseAdapter):
                 log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
                 break
 
-            yielded_count = 0
+            # --- ZBIERAMY NOWE OFERTY (BEZ yield) ---
+            new_items: list[tuple[str, str]] = []
             for href in links:
                 oid = _offer_id_from_url(href)
                 
                 # Deduplikacja
                 if not oid or oid in dedup_ids:
                     continue
+                new_items.append((oid, href))
+
+            # --- AUTO-STOP NA PODSTAWIE `new == 0` ---
+            if not new_items:
+                no_new_pages += 1
+            else:
+                no_new_pages = 0
+
+            if no_new_pages >= 2:
+                log.info(
+                    "discover_stop_no_new",
+                    extra={"extra": {"page": page}},
+                )
+                break
+
+            # --- Yield (Wypluwamy wynik) ---
+            for oid, href in new_items:
                 dedup_ids.add(oid)
-                
-                # Yield (Wypluwamy wynik)
                 yield {
                     "offer_url": normalize_url(href),
                     "offer_id": oid,
                     "page_idx": page,
                     "source": self.source
                 }
-                yielded_count += 1
 
-            log.info("discover_page_done", extra={"extra": {"page": page, "found": len(links), "new": yielded_count}})
+            log.info(
+                "discover_page_done",
+                extra={"extra": {"page": page, "found": len(links), "new": len(new_items)}},
+            )
+
             page += 1
-    
+
     def with_deps(self, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http
         self.out_dir = out_dir

@@ -161,10 +161,11 @@ def run_otodom_stream(
 
 def run_morizon_stream(
     *,
-    city: str | None,       # Może być None (Cała Polska)
+    city: str | None,
     deal: str,
     kind: str,
-    limit: int | None,      # Limit OFERT (a nie stron)
+    limit: int | None,        # limit OFERT
+    max_pages: int | None,    # limit STRON  ← DODAJ
     user_agent: str,
     timeout_s: int,
     rps: float,
@@ -172,7 +173,7 @@ def run_morizon_stream(
     https_proxy: str | None = None,
 ):
     """
-    Główna pętla strumieniowa dla Otodom.
+    Główna pętla strumieniowa dla Morizon.
     """
     log = setup_json_logger()
     cfg = load_settings()
@@ -186,13 +187,17 @@ def run_morizon_stream(
     )
     
     try:
-        adapter = MorizonAdapter().with_deps(http=http, out_dir=cfg.io.out_dir)
+        adapter = MorizonAdapter().with_deps(http=http, out_dir=cfg.io.out_dir, use_osm_geocode=True)
 
-        log.info("stream_start", extra={"source": "otodom", "city": city, "limit": limit})
+        log.info("stream_start", extra={"source": "morizon", "city": city, "limit": limit})
         
         # Wywołujemy discover z max_pages=None (nieskończoność), sterujemy limitem ofert w pętli
-        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=None)
-        
+        rows = adapter.discover(
+            city=city,
+            deal=deal,
+            kind=kind,
+            max_pages=max_pages,
+        )
         processed_count = 0
 
         for row in rows:
@@ -212,7 +217,6 @@ def run_morizon_stream(
 
     finally:
         http.close()
-
 def run_gratka_stream(
     *,
     city: str | None,       # Może być None (Cała Polska)

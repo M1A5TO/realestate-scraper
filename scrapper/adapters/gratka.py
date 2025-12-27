@@ -698,6 +698,7 @@ class GratkaAdapter(BaseAdapter):
         """
         assert self.http is not None
         dedup: set[str] = set()
+        no_new_pages = 0
 
         kind_slug = {
             "mieszkania": "mieszkania",
@@ -712,17 +713,19 @@ class GratkaAdapter(BaseAdapter):
 
         # Budowa szablonu URL (z miastem lub bez)
         if city:
-            # Zakładam, że funkcja _slug jest dostępna w pliku (była w Twoim kodzie)
             city_slug = _slug(city)
             url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}?page={{}}"
         else:
-            # Wersja ogólnopolska
             url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}?page={{}}"
 
         page = 1
         while True:
             # 1. Sprawdź limit stron (jeśli podano)
             if max_pages is not None and page > max_pages:
+                log.info(
+                    "discover_stop_max_pages",
+                    extra={"extra": {"page": page}},
+                )
                 break
 
             url = url_template.format(page)
@@ -740,25 +743,44 @@ class GratkaAdapter(BaseAdapter):
                 log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
                 break
 
-            yielded_count = 0
+            # --- ZBIERAMY NOWE OFERTY (BEZ yield) ---
+            new_items: list[tuple[str, str]] = []
             for href in links:
                 m = re.search(r"/ob/(\d+)", href)
                 offer_id = f"{m.group(1)}" if m else ""
-                
+
                 if offer_id and offer_id in dedup:
                     continue
+                new_items.append((offer_id, href))
+
+            # --- AUTO-STOP NA PODSTAWIE `new == 0` ---
+            if not new_items:
+                no_new_pages += 1
+            else:
+                no_new_pages = 0
+
+            if no_new_pages >= 2:
+                log.info(
+                    "discover_stop_no_new",
+                    extra={"extra": {"page": page}},
+                )
+                break
+
+            # --- Yield zamiast append ---
+            for offer_id, href in new_items:
                 dedup.add(offer_id or href)
-                
-                # Yield zamiast append
                 yield {
                     "offer_url": href,
                     "offer_id": offer_id,
                     "page_idx": page,
                     "source": self.source
                 }
-                yielded_count += 1
 
-            log.info("discover_page_done", extra={"extra": {"page": page, "found": len(links), "new": yielded_count}})
+            log.info(
+                "discover_page_done",
+                extra={"extra": {"page": page, "found": len(links), "new": len(new_items)}},
+            )
+
             page += 1
 
 

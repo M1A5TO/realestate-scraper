@@ -26,6 +26,24 @@ from scrapper.pipelines.stream import (
     run_gratka_stream, 
     run_trojmiasto_stream
 )
+VOIVODESHIPS = [
+    "dolnoslaskie",
+    "kujawsko-pomorskie",
+    "lubelskie",
+    "lubuskie",
+    "lodzkie",
+    "malopolskie",
+    "mazowieckie",
+    "opolskie",
+    "podkarpackie",
+    "podlaskie",
+    "pomorskie",
+    "slaskie",
+    "swietokrzyskie",
+    "warminsko-mazurskie",
+    "wielkopolskie",
+    "zachodniopomorskie",
+]
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
@@ -355,10 +373,11 @@ def morizon_full_cmd(
 
 @morizon.command("live")
 def morizon_live(
-    limit: Optional[int] = None,  # Opcjonalny limit ofert
-    city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
-    deal: Optional[str] = None,
-    kind: Optional[str] = None,
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Limit ofert"),
+    max_pages: int = typer.Option(1, "--max-pages", "-p", min=1, show_default=True),
+    city: Optional[str] = typer.Option(None, "--city", "-c"),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k"),
 ):
     """
     Tryb LIVE: Pobiera oferty z Otodom.
@@ -375,12 +394,44 @@ def morizon_live(
         deal=deal or cfg.defaults.deal,
         kind=kind or cfg.defaults.kind,
         limit=limit,
+        max_pages=max_pages,   # ← DODAJ TO
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
         rps=cfg.http.rate_limit_rps,
         http_proxy=cfg.http.http_proxy,
         https_proxy=cfg.http.https_proxy,
     )
+
+@morizon.command("live-all")
+def morizon_live_all(
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Limit ofert"),
+    max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+):
+    """
+    Tryb LIVE-ALL:
+    Działa identycznie jak `live`, ale po kolei dla wszystkich województw.
+    """
+    cfg = load_settings()
+
+    for region in VOIVODESHIPS:
+        typer.echo(f"[LIVE-ALL] start region={region}")
+
+        run_morizon_stream(
+            city=region,
+            deal=deal or cfg.defaults.deal,
+            kind=kind or cfg.defaults.kind,
+            limit=limit,
+            max_pages=max_pages,
+            user_agent=cfg.http.user_agent,
+            timeout_s=cfg.http.timeout_s,
+            rps=cfg.http.rate_limit_rps,
+            http_proxy=cfg.http.http_proxy,
+            https_proxy=cfg.http.https_proxy,
+        )
+
+        typer.echo(f"[LIVE-ALL] done region={region}")
 
 # ---------------- GRATKA ----------------
 
@@ -514,6 +565,7 @@ def gratka_live(
     city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
     deal: Optional[str] = None,
     kind: Optional[str] = None,
+    max_pages: int = typer.Option(1, "--max-pages", min=1),
 ):
     """
     Tryb LIVE: Pobiera oferty z Otodom.
@@ -535,7 +587,39 @@ def gratka_live(
         rps=cfg.http.rate_limit_rps,
         http_proxy=cfg.http.http_proxy,
         https_proxy=cfg.http.https_proxy,
+        max_pages=max_pages,
     )
+
+@gratka.command("live-all")
+def gratka_live_all(
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Limit ofert"),
+    max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+):
+    """
+    Tryb LIVE-ALL:
+    Działa identycznie jak `live`, ale po kolei dla wszystkich województw.
+    """
+    cfg = load_settings()
+
+    for region in VOIVODESHIPS:
+        typer.echo(f"[LIVE-ALL] start region={region}")
+
+        run_gratka_stream(
+            city=region,
+            deal=deal or cfg.defaults.deal,
+            kind=kind or cfg.defaults.kind,
+            limit=limit,
+            max_pages=max_pages,
+            user_agent=cfg.http.user_agent,
+            timeout_s=cfg.http.timeout_s,
+            rps=cfg.http.rate_limit_rps,
+            http_proxy=cfg.http.http_proxy,
+            https_proxy=cfg.http.https_proxy,
+        )
+
+        typer.echo(f"[LIVE-ALL] done region={region}")
 
 # ---------------- TROJMIASTO ----------------
 
@@ -669,6 +753,7 @@ def trojmiasto_live(
     city: Optional[str] = None,   # Opcjonalne miasto (brak = cała Polska)
     deal: Optional[str] = None,
     kind: Optional[str] = None,
+    max_pages: int = typer.Option(1, "--max-pages", min=1),
 ):
     """
     Tryb LIVE: Pobiera oferty z Otodom.
@@ -690,6 +775,7 @@ def trojmiasto_live(
         rps=cfg.http.rate_limit_rps,
         http_proxy=cfg.http.http_proxy,
         https_proxy=cfg.http.https_proxy,
+        max_pages=max_pages,
     )
 
 if __name__ == "__main__":

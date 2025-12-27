@@ -40,3 +40,7 @@ class BaseAdapter(Protocol):
         html_or_url: adapter może przyjąć już pobrany HTML lub URL do dociągnięcia.
         """
         ...
+        
+    def get_total_pages(self, *, city: str, deal: str, kind: str) -> int:
+        """Zwraca całkowitą liczbę stron listingu"""
+        ...

@@ -209,8 +209,7 @@ class BackendClient:
 
             # Wiadomość dla modułów SI
             message = {
-                "apartment_id": apartment_id,
-                "action": "process_new_apartment"
+                "apartment_id": apartment_id
             }
 
             channel.basic_publish(
