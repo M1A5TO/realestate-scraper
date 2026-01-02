@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import json
+import re
 import typer
 
 from scrapper.config import load_settings
@@ -68,6 +69,14 @@ def _append_done_region(path: Path, region: str) -> None:
         f.write(region.strip() + "\n")
 
 
+def _write_done_regions(path: Path, regions: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    txt = "\n".join(sorted({r.strip() for r in regions if r and r.strip()}))
+    if txt:
+        txt += "\n"
+    path.write_text(txt, encoding="utf-8")
+
+
 def _load_json(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -80,6 +89,159 @@ def _load_json(path: Path) -> dict:
 def _save_json(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+_LIVE_ALL_START_RE = re.compile(r"\[LIVE-ALL\]\s*start\s+region=(?P<region>[a-z0-9\-]+)", re.I)
+_LIVE_ALL_DONE_RE = re.compile(r"\[LIVE-ALL\]\s*done\s+region=(?P<region>[a-z0-9\-]+)", re.I)
+
+
+def _extract_page_from_url(url: str) -> int | None:
+    if not url:
+        return None
+    m = re.search(r"[\?&]page=(\d+)", url)
+    if not m:
+        m = re.search(r"/\?page=(\d+)", url)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _flatten_extra(obj: dict) -> dict:
+    extra = obj.get("extra")
+    if isinstance(extra, dict) and "extra" in extra and isinstance(extra.get("extra"), dict):
+        # czasem mamy extra={"extra": {...}}
+        return extra.get("extra")  # type: ignore[return-value]
+    return extra if isinstance(extra, dict) else {}
+
+
+def _parse_live_all_log(log_path: Path, *, strict_errors: bool) -> dict[str, dict]:
+    """Zwraca per-region: done(bool), last_page_done(int), stop_reason(str|None).
+
+    Heurystyka:
+      - region uznany za done tylko jeśli wystąpiło "[LIVE-ALL] done region=..." i nie było discover_fetch_fail
+      - strict_errors=True dodatkowo wymaga braku logów level=ERROR w regionie
+      - last_page_done wyciągamy z discover_page_done.page (max)
+    """
+    regions: dict[str, dict] = {}
+    current: str | None = None
+
+    def ensure(r: str) -> dict:
+        regions.setdefault(
+            r,
+            {
+                "saw_done": False,
+                "had_fetch_fail": False,
+                "had_error": False,
+                "last_page_done": 0,
+                "stop_reason": None,
+            },
+        )
+        return regions[r]
+
+    for raw in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        m = _LIVE_ALL_START_RE.search(line)
+        if m:
+            current = m.group("region").lower()
+            ensure(current)
+            continue
+
+        m = _LIVE_ALL_DONE_RE.search(line)
+        if m:
+            r = m.group("region").lower()
+            ensure(r)["saw_done"] = True
+            current = None
+            continue
+
+        # JSON log line
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                obj = json.loads(line)
+            except Exception:
+                obj = None
+
+            if isinstance(obj, dict):
+                msg = obj.get("msg")
+                level = str(obj.get("level") or "").upper()
+                extra = _flatten_extra(obj)
+
+                if current:
+                    st = ensure(current)
+                    if strict_errors and level == "ERROR":
+                        st["had_error"] = True
+
+                    if msg == "discover_page_done":
+                        try:
+                            st["last_page_done"] = max(int(st["last_page_done"]), int(extra.get("page") or 0))
+                        except Exception:
+                            pass
+
+                    if msg == "discover_fetch_fail":
+                        st["had_fetch_fail"] = True
+                        st["stop_reason"] = "fetch_fail"
+                        url = str(extra.get("url") or "")
+                        fail_page = _extract_page_from_url(url)
+                        if fail_page and fail_page > 1:
+                            st["last_page_done"] = max(int(st["last_page_done"]), fail_page - 1)
+                continue
+
+        # Non-JSON (fallback): jeśli w regionie pojawia się 'discover_fetch_fail'
+        if current and "discover_fetch_fail" in line:
+            st = ensure(current)
+            st["had_fetch_fail"] = True
+            st["stop_reason"] = "fetch_fail"
+            continue
+
+        if current and strict_errors and ("\"level\": \"ERROR\"" in line or line.startswith("ERROR")):
+            ensure(current)["had_error"] = True
+
+    out: dict[str, dict] = {}
+    for r, st in regions.items():
+        done = bool(st.get("saw_done")) and not bool(st.get("had_fetch_fail"))
+        if strict_errors and bool(st.get("had_error")):
+            done = False
+        out[r] = {
+            "done": done,
+            "last_page_done": int(st.get("last_page_done") or 0),
+            "stop_reason": st.get("stop_reason"),
+        }
+    return out
+
+
+def _sync_live_all_from_log(
+    *,
+    source: str,
+    log_path: Path,
+    out_dir: Path,
+    strict_errors: bool,
+) -> None:
+    done_path = out_dir / f"{source}_live_all_done.txt"
+    state_path = out_dir / f"{source}_live_all_state.json"
+
+    done = _load_done_regions(done_path)
+    state = _load_json(state_path)
+    parsed = _parse_live_all_log(log_path, strict_errors=strict_errors)
+
+    for region, st in parsed.items():
+        state.setdefault(region, {})
+        if not isinstance(state.get(region), dict):
+            state[region] = {}
+
+        state[region]["last_page_done"] = int(st.get("last_page_done") or 0)
+        state[region]["stop_reason"] = st.get("stop_reason")
+        state[region]["done"] = bool(st.get("done"))
+
+        if st.get("done"):
+            done.add(region)
+
+    _save_json(state_path, state)
+    _write_done_regions(done_path, done)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
@@ -535,6 +697,21 @@ def morizon_live_all(
         done.add(region)
         typer.echo(f"[LIVE-ALL] done region={region}")
 
+
+@morizon.command("sync-done-from-log")
+def morizon_sync_done_from_log(
+    log_path: Path = typer.Argument(..., help="Ścieżka do pliku z logiem/wyjściem konsoli z uruchomienia live-all"),
+    strict_errors: bool = typer.Option(
+        False,
+        "--strict-errors",
+        help="Jeśli ustawione, region jest DONE tylko gdy nie było żadnych logów level=ERROR w tym regionie",
+    ),
+):
+    """Uzupełnia morizon_live_all_state.json i morizon_live_all_done.txt na podstawie zapisanego logu."""
+    cfg = load_settings()
+    _sync_live_all_from_log(source="morizon", log_path=log_path, out_dir=Path(cfg.io.out_dir), strict_errors=strict_errors)
+    typer.echo({"ok": True, "source": "morizon", "log_path": str(log_path)})
+
 # ---------------- GRATKA ----------------
 
 @gratka.command("discover")
@@ -690,6 +867,7 @@ def gratka_live(
         http_proxy=cfg.http.http_proxy,
         https_proxy=cfg.http.https_proxy,
         max_pages=max_pages,
+        start_page=1,
     )
 
 @gratka.command("live-all")
@@ -705,23 +883,101 @@ def gratka_live_all(
     """
     cfg = load_settings()
 
+    done_path = Path(cfg.io.out_dir) / "gratka_live_all_done.txt"
+    state_path = Path(cfg.io.out_dir) / "gratka_live_all_state.json"
+
+    done = _load_done_regions(done_path)
+    state = _load_json(state_path)
+
+    # kompatybilność: jeśli done.txt już ma wpisy, traktuj je jako ukończone
+    for r in done:
+        state.setdefault(r, {})
+        if isinstance(state.get(r), dict):
+            state[r].setdefault("done", True)
+            state[r].setdefault("last_page_done", 0)
+
+    if done or state:
+        remaining = 0
+        for r in VOIVODESHIPS:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining += 1
+        typer.echo(f"[LIVE-ALL] resume enabled: remaining={remaining} state={state_path}")
+
     for region in VOIVODESHIPS:
+        r_state = state.get(region) if isinstance(state.get(region), dict) else {}
+        is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+        if is_done:
+            typer.echo(f"[LIVE-ALL] skip region={region} (already done)")
+            continue
+
+        last_page_done = 0
+        if isinstance(r_state, dict):
+            try:
+                last_page_done = int(r_state.get("last_page_done") or 0)
+            except Exception:
+                last_page_done = 0
+        start_page = max(1, last_page_done + 1)
+
         typer.echo(f"[LIVE-ALL] start region={region}")
 
-        run_gratka_stream(
-            city=region,
-            deal=deal or cfg.defaults.deal,
-            kind=kind or cfg.defaults.kind,
-            limit=limit,
-            max_pages=max_pages,
-            user_agent=cfg.http.user_agent,
-            timeout_s=cfg.http.timeout_s,
-            rps=cfg.http.rate_limit_rps,
-            http_proxy=cfg.http.http_proxy,
-            https_proxy=cfg.http.https_proxy,
-        )
+        try:
+            st = run_gratka_stream(
+                city=region,
+                deal=deal or cfg.defaults.deal,
+                kind=kind or cfg.defaults.kind,
+                limit=limit,
+                max_pages=max_pages,
+                start_page=start_page,
+                user_agent=cfg.http.user_agent,
+                timeout_s=cfg.http.timeout_s,
+                rps=cfg.http.rate_limit_rps,
+                http_proxy=cfg.http.http_proxy,
+                https_proxy=cfg.http.https_proxy,
+            )
+        except Exception as e:
+            typer.echo(f"[LIVE-ALL] fail region={region} err={type(e).__name__}: {e}")
+            continue
 
+        processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
+        last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
+        stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
+
+        state.setdefault(region, {})
+        if not isinstance(state.get(region), dict):
+            state[region] = {}
+
+        state[region]["last_page_done"] = max(last_page_done, last_done)
+        state[region]["stop_reason"] = stop_reason
+        state[region]["processed_offers_last_run"] = processed
+
+        if stop_reason == "fetch_fail":
+            state[region]["done"] = False
+            _save_json(state_path, state)
+            typer.echo(f"[LIVE-ALL] incomplete region={region} (fetch_fail); will resume from page={state[region]['last_page_done'] + 1}")
+            continue
+
+        state[region]["done"] = True
+        _save_json(state_path, state)
+        _append_done_region(done_path, region)
+        done.add(region)
         typer.echo(f"[LIVE-ALL] done region={region}")
+
+
+@gratka.command("sync-done-from-log")
+def gratka_sync_done_from_log(
+    log_path: Path = typer.Argument(..., help="Ścieżka do pliku z logiem/wyjściem konsoli z uruchomienia live-all"),
+    strict_errors: bool = typer.Option(
+        False,
+        "--strict-errors",
+        help="Jeśli ustawione, region jest DONE tylko gdy nie było żadnych logów level=ERROR w tym regionie",
+    ),
+):
+    """Uzupełnia gratka_live_all_state.json i gratka_live_all_done.txt na podstawie zapisanego logu."""
+    cfg = load_settings()
+    _sync_live_all_from_log(source="gratka", log_path=log_path, out_dir=Path(cfg.io.out_dir), strict_errors=strict_errors)
+    typer.echo({"ok": True, "source": "gratka", "log_path": str(log_path)})
 
 # ---------------- TROJMIASTO ----------------
 

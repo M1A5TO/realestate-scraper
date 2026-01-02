@@ -683,6 +683,11 @@ class GratkaAdapter(BaseAdapter):
     out_dir: Optional[Path] = None
     use_osm_geocode: bool = False
 
+    # Stan ostatniego discover (używane przez live-all/resume)
+    discover_last_page_done: int = 0
+    discover_stop_reason: str | None = None
+    discover_failed_page: int | None = None
+
     def with_deps(self, *, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http
         self.out_dir = out_dir
@@ -690,7 +695,15 @@ class GratkaAdapter(BaseAdapter):
         return self
 
     # ---------- DISCOVER ----------
-    def discover(self, *, city: str | None = None, deal: str, kind: str, max_pages: int | None = None) -> Iterable[OfferIndex]:
+    def discover(
+        self,
+        *,
+        city: str | None = None,
+        deal: str,
+        kind: str,
+        max_pages: int | None = None,
+        start_page: int = 1,
+    ) -> Iterable[OfferIndex]:
         """
         Pobiera linki w trybie ciągłym.
         city=None -> Cała Polska.
@@ -718,7 +731,11 @@ class GratkaAdapter(BaseAdapter):
         else:
             url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}?page={{}}"
 
-        page = 1
+        self.discover_last_page_done = 0
+        self.discover_stop_reason = None
+        self.discover_failed_page = None
+
+        page = max(1, int(start_page or 1))
         while True:
             # 1. Sprawdź limit stron (jeśli podano)
             if max_pages is not None and page > max_pages:
@@ -726,6 +743,7 @@ class GratkaAdapter(BaseAdapter):
                     "discover_stop_max_pages",
                     extra={"extra": {"page": page}},
                 )
+                self.discover_stop_reason = "max_pages"
                 break
 
             url = url_template.format(page)
@@ -733,6 +751,8 @@ class GratkaAdapter(BaseAdapter):
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": url, "err": type(e).__name__}})
+                self.discover_stop_reason = "fetch_fail"
+                self.discover_failed_page = page
                 break
 
             # Jeśli city=None, przekazujemy pusty string, żeby funkcja nie filtrowała po nazwie miasta
@@ -741,6 +761,7 @@ class GratkaAdapter(BaseAdapter):
             # --- AUTO-STOP ---
             if not links:
                 log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                self.discover_stop_reason = "no_links"
                 break
 
             # --- ZBIERAMY NOWE OFERTY (BEZ yield) ---
@@ -764,6 +785,7 @@ class GratkaAdapter(BaseAdapter):
                     "discover_stop_no_new",
                     extra={"extra": {"page": page}},
                 )
+                self.discover_stop_reason = "no_new"
                 break
 
             # --- Yield zamiast append ---
@@ -780,6 +802,8 @@ class GratkaAdapter(BaseAdapter):
                 "discover_page_done",
                 extra={"extra": {"page": page, "found": len(links), "new": len(new_items)}},
             )
+
+            self.discover_last_page_done = page
 
             page += 1
 
