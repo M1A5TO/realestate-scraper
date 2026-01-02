@@ -166,6 +166,7 @@ def run_morizon_stream(
     kind: str,
     limit: int | None,        # limit OFERT
     max_pages: int | None,    # limit STRON  ← DODAJ
+    start_page: int = 1,      # resume od tej strony (1 = od początku)
     user_agent: str,
     timeout_s: int,
     rps: float,
@@ -197,6 +198,7 @@ def run_morizon_stream(
             deal=deal,
             kind=kind,
             max_pages=max_pages,
+            start_page=start_page,
         )
         processed_count = 0
 
@@ -215,6 +217,13 @@ def run_morizon_stream(
             
             processed_count += 1
 
+        return {
+            "processed_offers": processed_count,
+            "discover_last_page_done": getattr(adapter, "discover_last_page_done", 0),
+            "discover_stop_reason": getattr(adapter, "discover_stop_reason", None),
+            "discover_failed_page": getattr(adapter, "discover_failed_page", None),
+        }
+
     finally:
         http.close()
 def run_gratka_stream(
@@ -223,6 +232,7 @@ def run_gratka_stream(
     deal: str,
     kind: str,
     limit: int | None,      # Limit OFERT (a nie stron)
+    max_pages: int | None,
     user_agent: str,
     timeout_s: int,
     rps: float,
@@ -249,7 +259,7 @@ def run_gratka_stream(
         log.info("stream_start", extra={"source": "otodom", "city": city, "limit": limit})
         
         # Wywołujemy discover z max_pages=None (nieskończoność), sterujemy limitem ofert w pętli
-        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=None)
+        rows = adapter.discover(city=city, deal=deal, kind=kind, max_pages=max_pages)
         
         processed_count = 0
 

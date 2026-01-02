@@ -364,6 +364,11 @@ class MorizonAdapter(BaseAdapter):
     out_dir: Optional[Path] = None
     use_osm_geocode: bool = False
 
+    # Stan ostatniego discover (używane przez live-all/resume)
+    discover_last_page_done: int = 0
+    discover_stop_reason: str | None = None
+    discover_failed_page: int | None = None
+
     def with_deps(self, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http
         self.out_dir = out_dir
@@ -589,7 +594,15 @@ class MorizonAdapter(BaseAdapter):
 
         return data
 
-    def discover(self, *, city: str | None = None, deal: str, kind: str, max_pages: int | None = None) -> Iterable[OfferIndex]:
+    def discover(
+        self,
+        *,
+        city: str | None = None,
+        deal: str,
+        kind: str,
+        max_pages: int | None = None,
+        start_page: int = 1,
+    ) -> Iterable[OfferIndex]:
         """
         Pobiera linki w trybie ciągłym.
         city=None -> Cała Polska.
@@ -620,7 +633,11 @@ class MorizonAdapter(BaseAdapter):
             base_url = f"https://www.morizon.pl/{category}/"
             alt_base_url = f"https://www.morizon.pl/nieruchomosci/{category}/"
 
-        page = 1
+        self.discover_last_page_done = 0
+        self.discover_stop_reason = None
+        self.discover_failed_page = None
+
+        page = max(1, int(start_page or 1))
         while True:
             # 1. Sprawdź limit stron
             if max_pages is not None and page > max_pages:
@@ -628,6 +645,7 @@ class MorizonAdapter(BaseAdapter):
                     "discover_stop_max_pages",
                     extra={"extra": {"page": page}},
                 )
+                self.discover_stop_reason = "max_pages"
                 break
 
             url = f"{base_url}?page={page}"
@@ -635,6 +653,8 @@ class MorizonAdapter(BaseAdapter):
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": url, "err": type(e).__name__}})
+                self.discover_stop_reason = "fetch_fail"
+                self.discover_failed_page = page
                 break
 
             links = _extract_offer_links(html)
@@ -651,6 +671,7 @@ class MorizonAdapter(BaseAdapter):
             # --- AUTO-STOP ---
             if not links:
                 log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                self.discover_stop_reason = "no_links"
                 break
 
             # --- ZBIERAMY NOWE OFERTY (BEZ yield) ---
@@ -674,6 +695,7 @@ class MorizonAdapter(BaseAdapter):
                     "discover_stop_no_new",
                     extra={"extra": {"page": page}},
                 )
+                self.discover_stop_reason = "no_new"
                 break
 
             # --- Yield (Wypluwamy wynik) ---
@@ -690,6 +712,8 @@ class MorizonAdapter(BaseAdapter):
                 "discover_page_done",
                 extra={"extra": {"page": page, "found": len(links), "new": len(new_items)}},
             )
+
+            self.discover_last_page_done = page
 
             page += 1
 

@@ -45,6 +45,42 @@ VOIVODESHIPS = [
     "zachodniopomorskie",
 ]
 
+
+def _load_done_regions(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return set()
+    out: set[str] = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.add(line)
+    return out
+
+
+def _append_done_region(path: Path, region: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(region.strip() + "\n")
+
+
+def _load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_json(path: Path, obj: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
 otodom = typer.Typer(help="Operacje dla źródła: Otodom", rich_markup_mode=None)
@@ -395,6 +431,7 @@ def morizon_live(
         kind=kind or cfg.defaults.kind,
         limit=limit,
         max_pages=max_pages,   # ← DODAJ TO
+        start_page=1,
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
         rps=cfg.http.rate_limit_rps,
@@ -415,22 +452,87 @@ def morizon_live_all(
     """
     cfg = load_settings()
 
+    done_path = Path(cfg.io.out_dir) / "morizon_live_all_done.txt"  # pełne województwa
+    state_path = Path(cfg.io.out_dir) / "morizon_live_all_state.json"  # resume per-strona
+
+    done = _load_done_regions(done_path)
+    state = _load_json(state_path)
+
+    # kompatybilność: jeśli done.txt już ma wpisy, traktuj je jako ukończone
+    for r in done:
+        state.setdefault(r, {})
+        if isinstance(state.get(r), dict):
+            state[r].setdefault("done", True)
+            state[r].setdefault("last_page_done", 0)
+
+    if done or state:
+        remaining = 0
+        for r in VOIVODESHIPS:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining += 1
+        typer.echo(f"[LIVE-ALL] resume enabled: remaining={remaining} state={state_path}")
+
     for region in VOIVODESHIPS:
+        r_state = state.get(region) if isinstance(state.get(region), dict) else {}
+        is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+        if is_done:
+            typer.echo(f"[LIVE-ALL] skip region={region} (already done)")
+            continue
+
+        last_page_done = 0
+        if isinstance(r_state, dict):
+            try:
+                last_page_done = int(r_state.get("last_page_done") or 0)
+            except Exception:
+                last_page_done = 0
+        start_page = max(1, last_page_done + 1)
+
         typer.echo(f"[LIVE-ALL] start region={region}")
 
-        run_morizon_stream(
-            city=region,
-            deal=deal or cfg.defaults.deal,
-            kind=kind or cfg.defaults.kind,
-            limit=limit,
-            max_pages=max_pages,
-            user_agent=cfg.http.user_agent,
-            timeout_s=cfg.http.timeout_s,
-            rps=cfg.http.rate_limit_rps,
-            http_proxy=cfg.http.http_proxy,
-            https_proxy=cfg.http.https_proxy,
-        )
+        try:
+            st = run_morizon_stream(
+                city=region,
+                deal=deal or cfg.defaults.deal,
+                kind=kind or cfg.defaults.kind,
+                limit=limit,
+                max_pages=max_pages,
+                start_page=start_page,
+                user_agent=cfg.http.user_agent,
+                timeout_s=cfg.http.timeout_s,
+                rps=cfg.http.rate_limit_rps,
+                http_proxy=cfg.http.http_proxy,
+                https_proxy=cfg.http.https_proxy,
+            )
+        except Exception as e:
+            typer.echo(f"[LIVE-ALL] fail region={region} err={type(e).__name__}: {e}")
+            continue
 
+        # Aktualizacja stanu (nie oznaczaj jako done, jeśli discover przerwał na fetch_fail)
+        processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
+        last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
+        stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
+
+        state.setdefault(region, {})
+        if not isinstance(state.get(region), dict):
+            state[region] = {}
+
+        state[region]["last_page_done"] = max(last_page_done, last_done)
+        state[region]["stop_reason"] = stop_reason
+        state[region]["processed_offers_last_run"] = processed
+
+        if stop_reason == "fetch_fail":
+            state[region]["done"] = False
+            _save_json(state_path, state)
+            typer.echo(f"[LIVE-ALL] incomplete region={region} (fetch_fail); will resume from page={state[region]['last_page_done'] + 1}")
+            continue
+
+        # Jeśli nie było fetch_fail, uznaj region za ukończony (nawet jeśli 0 ofert, np. brak wyników)
+        state[region]["done"] = True
+        _save_json(state_path, state)
+        _append_done_region(done_path, region)
+        done.add(region)
         typer.echo(f"[LIVE-ALL] done region={region}")
 
 # ---------------- GRATKA ----------------
