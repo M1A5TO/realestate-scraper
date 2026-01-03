@@ -47,6 +47,53 @@ VOIVODESHIPS = [
     "zachodniopomorskie",
 ]
 
+VOIVODESHIPS2 = [
+    "warszawa",
+    "krakow",
+    "lodz",
+    "wroclaw",
+    "poznan",
+    "gdansk",
+    "szczecin",
+    "bydgoszcz",
+    "lublin",
+    "bialystok",
+    "katowice",
+    "gdynia",
+    "czestochowa",
+    "radom",
+    "sosnowiec",
+    "torun",
+    "kielce",
+    "rzeszow",
+    "gliwice",
+    "zabrze",
+    "olsztyn",
+    "opole",
+    "zielona-gora",
+    "gorzow-wielkopolski",
+    "plock",
+    "elblag",
+    "walbrzych",
+    "tarnow",
+    "koszalin",
+    "legnica",
+    "grudziadz",
+    "slupsk",
+    "jaworzno",
+    "nowy-sacz",
+    "jelenia-gora",
+    "konin",
+    "piotrkow-trybunalski",
+    "inowroclaw",
+    "ostrow-wielkopolski",
+    "gniezno",
+    "chelm",
+    "przemysl",
+    "zamosc",
+    "reda",
+]
+
 
 def _load_done_regions(path: Path) -> set[str]:
     if not path.exists():
@@ -739,6 +786,136 @@ def morizon_live_all(
             break
 
 
+@morizon.command("live-all-cities")
+def morizon_live_all_cities(
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Limit ofert"),
+    max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    retry_rounds: int = typer.Option(
+        0,
+        "--retry-rounds",
+        min=0,
+        show_default=True,
+        help="Ile dodatkowych rund wykonać po zakończeniu listy miast, aby dokończyć miasta z fetch_fail",
+    ),
+    retry_sleep_s: int = typer.Option(
+        120,
+        "--retry-sleep-s",
+        min=0,
+        show_default=True,
+        help="Ile sekund czekać między rundami retry",
+    ),
+):
+    """LIVE-ALL po miastach (VOIVODESHIPS2) z resume + retry."""
+    cfg = load_settings()
+
+    done_path = Path(cfg.io.out_dir) / "morizon_live_all_cities_done.txt"
+    state_path = Path(cfg.io.out_dir) / "morizon_live_all_cities_state.json"
+
+    done = _load_done_regions(done_path)
+    state = _load_json(state_path)
+
+    for r in done:
+        state.setdefault(r, {})
+        if isinstance(state.get(r), dict):
+            state[r].setdefault("done", True)
+            state[r].setdefault("last_page_done", 0)
+
+    if done or state:
+        remaining = 0
+        for r in VOIVODESHIPS2:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining += 1
+        typer.echo(f"[LIVE-ALL-CITIES] resume enabled: remaining={remaining} state={state_path}")
+
+    max_round = int(retry_rounds or 0)
+    for round_idx in range(0, max_round + 1):
+        if round_idx > 0 and retry_sleep_s > 0:
+            typer.echo(f"[LIVE-ALL-CITIES] retry round={round_idx}/{max_round}: sleeping {retry_sleep_s}s")
+            time.sleep(retry_sleep_s)
+
+        had_fetch_fail = False
+        remaining_before = 0
+        for r in VOIVODESHIPS2:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining_before += 1
+
+        typer.echo(f"[LIVE-ALL-CITIES] round={round_idx} remaining={remaining_before}")
+        if remaining_before == 0:
+            break
+
+        for city in VOIVODESHIPS2:
+            r_state = state.get(city) if isinstance(state.get(city), dict) else {}
+            is_done = bool(city in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if is_done:
+                typer.echo(f"[LIVE-ALL-CITIES] skip city={city} (already done)")
+                continue
+
+            last_page_done = 0
+            if isinstance(r_state, dict):
+                try:
+                    last_page_done = int(r_state.get("last_page_done") or 0)
+                except Exception:
+                    last_page_done = 0
+            start_page = max(1, last_page_done + 1)
+
+            typer.echo(f"[LIVE-ALL-CITIES] start city={city}")
+
+            try:
+                st = run_morizon_stream(
+                    city=city,
+                    deal=deal or cfg.defaults.deal,
+                    kind=kind or cfg.defaults.kind,
+                    limit=limit,
+                    max_pages=max_pages,
+                    start_page=start_page,
+                    user_agent=cfg.http.user_agent,
+                    timeout_s=cfg.http.timeout_s,
+                    rps=cfg.http.rate_limit_rps,
+                    http_proxy=cfg.http.http_proxy,
+                    https_proxy=cfg.http.https_proxy,
+                )
+            except Exception as e:
+                typer.echo(f"[LIVE-ALL-CITIES] fail city={city} err={type(e).__name__}: {e}")
+                had_fetch_fail = True
+                continue
+
+            processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
+            last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
+            stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
+
+            state.setdefault(city, {})
+            if not isinstance(state.get(city), dict):
+                state[city] = {}
+
+            state[city]["last_page_done"] = max(last_page_done, last_done)
+            state[city]["stop_reason"] = stop_reason
+            state[city]["processed_offers_last_run"] = processed
+
+            if stop_reason == "fetch_fail":
+                had_fetch_fail = True
+                state[city]["done"] = False
+                _save_json(state_path, state)
+                typer.echo(
+                    f"[LIVE-ALL-CITIES] incomplete city={city} (fetch_fail); will resume from page={state[city]['last_page_done'] + 1}"
+                )
+                continue
+
+            state[city]["done"] = True
+            _save_json(state_path, state)
+            _append_done_region(done_path, city)
+            done.add(city)
+            typer.echo(f"[LIVE-ALL-CITIES] done city={city}")
+
+        if not had_fetch_fail:
+            break
+
+
 @morizon.command("sync-done-from-log")
 def morizon_sync_done_from_log(
     log_path: Path = typer.Argument(..., help="Ścieżka do pliku z logiem/wyjściem konsoli z uruchomienia live-all"),
@@ -1045,6 +1222,136 @@ def gratka_live_all(
 
         if not had_fetch_fail:
             # Wszystkie niedokończone regiony domknęły się w tej rundzie
+            break
+
+
+@gratka.command("live-all-cities")
+def gratka_live_all_cities(
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Limit ofert"),
+    max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
+    deal: Optional[str] = typer.Option(None, "--deal", "-d"),
+    kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    retry_rounds: int = typer.Option(
+        0,
+        "--retry-rounds",
+        min=0,
+        show_default=True,
+        help="Ile dodatkowych rund wykonać po zakończeniu listy miast, aby dokończyć miasta z fetch_fail",
+    ),
+    retry_sleep_s: int = typer.Option(
+        120,
+        "--retry-sleep-s",
+        min=0,
+        show_default=True,
+        help="Ile sekund czekać między rundami retry",
+    ),
+):
+    """LIVE-ALL po miastach (VOIVODESHIPS2) z resume + retry."""
+    cfg = load_settings()
+
+    done_path = Path(cfg.io.out_dir) / "gratka_live_all_cities_done.txt"
+    state_path = Path(cfg.io.out_dir) / "gratka_live_all_cities_state.json"
+
+    done = _load_done_regions(done_path)
+    state = _load_json(state_path)
+
+    for r in done:
+        state.setdefault(r, {})
+        if isinstance(state.get(r), dict):
+            state[r].setdefault("done", True)
+            state[r].setdefault("last_page_done", 0)
+
+    if done or state:
+        remaining = 0
+        for r in VOIVODESHIPS2:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining += 1
+        typer.echo(f"[LIVE-ALL-CITIES] resume enabled: remaining={remaining} state={state_path}")
+
+    max_round = int(retry_rounds or 0)
+    for round_idx in range(0, max_round + 1):
+        if round_idx > 0 and retry_sleep_s > 0:
+            typer.echo(f"[LIVE-ALL-CITIES] retry round={round_idx}/{max_round}: sleeping {retry_sleep_s}s")
+            time.sleep(retry_sleep_s)
+
+        had_fetch_fail = False
+        remaining_before = 0
+        for r in VOIVODESHIPS2:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining_before += 1
+
+        typer.echo(f"[LIVE-ALL-CITIES] round={round_idx} remaining={remaining_before}")
+        if remaining_before == 0:
+            break
+
+        for city in VOIVODESHIPS2:
+            r_state = state.get(city) if isinstance(state.get(city), dict) else {}
+            is_done = bool(city in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if is_done:
+                typer.echo(f"[LIVE-ALL-CITIES] skip city={city} (already done)")
+                continue
+
+            last_page_done = 0
+            if isinstance(r_state, dict):
+                try:
+                    last_page_done = int(r_state.get("last_page_done") or 0)
+                except Exception:
+                    last_page_done = 0
+            start_page = max(1, last_page_done + 1)
+
+            typer.echo(f"[LIVE-ALL-CITIES] start city={city}")
+
+            try:
+                st = run_gratka_stream(
+                    city=city,
+                    deal=deal or cfg.defaults.deal,
+                    kind=kind or cfg.defaults.kind,
+                    limit=limit,
+                    max_pages=max_pages,
+                    start_page=start_page,
+                    user_agent=cfg.http.user_agent,
+                    timeout_s=cfg.http.timeout_s,
+                    rps=cfg.http.rate_limit_rps,
+                    http_proxy=cfg.http.http_proxy,
+                    https_proxy=cfg.http.https_proxy,
+                )
+            except Exception as e:
+                typer.echo(f"[LIVE-ALL-CITIES] fail city={city} err={type(e).__name__}: {e}")
+                had_fetch_fail = True
+                continue
+
+            processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
+            last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
+            stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
+
+            state.setdefault(city, {})
+            if not isinstance(state.get(city), dict):
+                state[city] = {}
+
+            state[city]["last_page_done"] = max(last_page_done, last_done)
+            state[city]["stop_reason"] = stop_reason
+            state[city]["processed_offers_last_run"] = processed
+
+            if stop_reason == "fetch_fail":
+                had_fetch_fail = True
+                state[city]["done"] = False
+                _save_json(state_path, state)
+                typer.echo(
+                    f"[LIVE-ALL-CITIES] incomplete city={city} (fetch_fail); will resume from page={state[city]['last_page_done'] + 1}"
+                )
+                continue
+
+            state[city]["done"] = True
+            _save_json(state_path, state)
+            _append_done_region(done_path, city)
+            done.add(city)
+            typer.echo(f"[LIVE-ALL-CITIES] done city={city}")
+
+        if not had_fetch_fail:
             break
 
 

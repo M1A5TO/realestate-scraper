@@ -50,6 +50,12 @@ MORIZON
   Opcjonalnie: automatyczne retry rundy po fetch_fail:
   python -m scrapper.cli morizon live-all --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
 
+- LIVE-ALL-CITIES (miasta + resume):
+  python -m scrapper.cli morizon live-all-cities --max-pages 200
+
+  Opcjonalnie: automatyczne retry rundy po fetch_fail:
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
+
 - Sync stanu z zapisanego logu:
   python -m scrapper.cli morizon sync-done-from-log path\\to\\log.txt
 
@@ -69,6 +75,12 @@ GRATKA
 
   Opcjonalnie: automatyczne retry rundy po fetch_fail:
   python -m scrapper.cli gratka live-all --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
+
+- LIVE-ALL-CITIES (miasta + resume):
+  python -m scrapper.cli gratka live-all-cities --max-pages 200
+
+  Opcjonalnie: automatyczne retry rundy po fetch_fail:
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
 
 - Sync stanu z zapisanego logu:
   python -m scrapper.cli gratka sync-done-from-log path\\to\\log.txt
