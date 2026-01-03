@@ -46,6 +46,53 @@ VOIVODESHIPS = [
     "zachodniopomorskie",
 ]
 
+VOIVODESHIPS2 = [
+    "warszawa",
+    "krakow",
+    "lodz",
+    "wroclaw",
+    "poznan",
+    "gdansk",
+    "szczecin",
+    "bydgoszcz",
+    "lublin",
+    "bialystok",
+    "katowice",
+    "gdynia",
+    "czestochowa",
+    "radom",
+    "sosnowiec",
+    "torun",
+    "kielce",
+    "rzeszow",
+    "gliwice",
+    "zabrze",
+    "olsztyn",
+    "opole",
+    "zielona-gora",
+    "gorzow-wielkopolski",
+    "plock",
+    "elblag",
+    "walbrzych",
+    "tarnow",
+    "koszalin",
+    "legnica",
+    "grudziadz",
+    "slupsk",
+    "jaworzno",
+    "nowy-sacz",
+    "jelenia-gora",
+    "konin",
+    "piotrkow-trybunalski",
+    "inowroclaw",
+    "ostrow-wielkopolski",
+    "gniezno",
+    "chelm",
+    "przemysl",
+    "zamosc",
+    "reda",
+]
+
 
 def _load_done_regions(path: Path) -> set[str]:
     if not path.exists():
@@ -629,14 +676,14 @@ def morizon_live_all(
 
     if done or state:
         remaining = 0
-        for r in VOIVODESHIPS:
+        for r in VOIVODESHIPS2:
             r_state = state.get(r) if isinstance(state.get(r), dict) else {}
             is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
             if not is_done:
                 remaining += 1
         typer.echo(f"[LIVE-ALL] resume enabled: remaining={remaining} state={state_path}")
 
-    for region in VOIVODESHIPS:
+    for region in VOIVODESHIPS2:
         r_state = state.get(region) if isinstance(state.get(region), dict) else {}
         is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
         if is_done:
@@ -898,14 +945,14 @@ def gratka_live_all(
 
     if done or state:
         remaining = 0
-        for r in VOIVODESHIPS:
+        for r in VOIVODESHIPS2:
             r_state = state.get(r) if isinstance(state.get(r), dict) else {}
             is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
             if not is_done:
                 remaining += 1
         typer.echo(f"[LIVE-ALL] resume enabled: remaining={remaining} state={state_path}")
 
-    for region in VOIVODESHIPS:
+    for region in VOIVODESHIPS2:
         r_state = state.get(region) if isinstance(state.get(region), dict) else {}
         is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
         if is_done:
