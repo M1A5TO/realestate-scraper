@@ -139,6 +139,19 @@ def _save_json(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _last_days_suffix(last_days: int) -> str:
+    """Suffix for checkpoint filenames.
+
+    last_days <= 0: no suffix (backward compatible)
+    last_days > 0:  e.g. _last30d
+    """
+    try:
+        d = int(last_days)
+    except Exception:
+        d = 0
+    return "" if d <= 0 else f"_last{d}d"
+
+
 _LIVE_ALL_START_RE = re.compile(r"\[LIVE-ALL\]\s*start\s+region=(?P<region>[a-z0-9\-]+)", re.I)
 _LIVE_ALL_DONE_RE = re.compile(r"\[LIVE-ALL\]\s*done\s+region=(?P<region>[a-z0-9\-]+)", re.I)
 
@@ -624,6 +637,13 @@ def morizon_live(
     city: Optional[str] = typer.Option(None, "--city", "-c"),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    last_days: int = typer.Option(
+        30,
+        "--last-days",
+        min=0,
+        show_default=True,
+        help="Filtr: bierz oferty z ostatnich N dni (0 = bez filtra)",
+    ),
 ):
     """
     Tryb LIVE: Pobiera oferty z Otodom.
@@ -641,6 +661,7 @@ def morizon_live(
         kind=kind or cfg.defaults.kind,
         limit=limit,
         max_pages=max_pages,   # ← DODAJ TO
+        last_days=(None if last_days <= 0 else last_days),
         start_page=1,
         user_agent=cfg.http.user_agent,
         timeout_s=cfg.http.timeout_s,
@@ -655,6 +676,13 @@ def morizon_live_all(
     max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    last_days: int = typer.Option(
+        30,
+        "--last-days",
+        min=0,
+        show_default=True,
+        help="Filtr: bierz oferty z ostatnich N dni (0 = bez filtra)",
+    ),
     retry_rounds: int = typer.Option(
         0,
         "--retry-rounds",
@@ -676,8 +704,9 @@ def morizon_live_all(
     """
     cfg = load_settings()
 
-    done_path = Path(cfg.io.out_dir) / "morizon_live_all_done.txt"  # pełne województwa
-    state_path = Path(cfg.io.out_dir) / "morizon_live_all_state.json"  # resume per-strona
+    suf = _last_days_suffix(last_days)
+    done_path = Path(cfg.io.out_dir) / f"morizon_live_all{suf}_done.txt"  # pełne województwa
+    state_path = Path(cfg.io.out_dir) / f"morizon_live_all{suf}_state.json"  # resume per-strona
 
     done = _load_done_regions(done_path)
     state = _load_json(state_path)
@@ -741,6 +770,7 @@ def morizon_live_all(
                     kind=kind or cfg.defaults.kind,
                     limit=limit,
                     max_pages=max_pages,
+                    last_days=(None if last_days <= 0 else last_days),
                     start_page=start_page,
                     user_agent=cfg.http.user_agent,
                     timeout_s=cfg.http.timeout_s,
@@ -792,6 +822,13 @@ def morizon_live_all_cities(
     max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    last_days: int = typer.Option(
+        30,
+        "--last-days",
+        min=0,
+        show_default=True,
+        help="Filtr: bierz oferty z ostatnich N dni (0 = bez filtra)",
+    ),
     retry_rounds: int = typer.Option(
         0,
         "--retry-rounds",
@@ -810,8 +847,9 @@ def morizon_live_all_cities(
     """LIVE-ALL po miastach (VOIVODESHIPS2) z resume + retry."""
     cfg = load_settings()
 
-    done_path = Path(cfg.io.out_dir) / "morizon_live_all_cities_done.txt"
-    state_path = Path(cfg.io.out_dir) / "morizon_live_all_cities_state.json"
+    suf = _last_days_suffix(last_days)
+    done_path = Path(cfg.io.out_dir) / f"morizon_live_all_cities{suf}_done.txt"
+    state_path = Path(cfg.io.out_dir) / f"morizon_live_all_cities{suf}_state.json"
 
     done = _load_done_regions(done_path)
     state = _load_json(state_path)
@@ -873,6 +911,7 @@ def morizon_live_all_cities(
                     kind=kind or cfg.defaults.kind,
                     limit=limit,
                     max_pages=max_pages,
+                    last_days=(None if last_days <= 0 else last_days),
                     start_page=start_page,
                     user_agent=cfg.http.user_agent,
                     timeout_s=cfg.http.timeout_s,
@@ -1063,6 +1102,13 @@ def gratka_live(
     deal: Optional[str] = None,
     kind: Optional[str] = None,
     max_pages: int = typer.Option(1, "--max-pages", min=1),
+    last_days: int = typer.Option(
+        30,
+        "--last-days",
+        min=0,
+        show_default=True,
+        help="Filtr: bierz oferty z ostatnich N dni (0 = bez filtra)",
+    ),
 ):
     """
     Tryb LIVE: Pobiera oferty z Otodom.
@@ -1085,6 +1131,7 @@ def gratka_live(
         http_proxy=cfg.http.http_proxy,
         https_proxy=cfg.http.https_proxy,
         max_pages=max_pages,
+        last_days=(None if last_days <= 0 else last_days),
         start_page=1,
     )
 
@@ -1094,6 +1141,13 @@ def gratka_live_all(
     max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    last_days: int = typer.Option(
+        30,
+        "--last-days",
+        min=0,
+        show_default=True,
+        help="Filtr: bierz oferty z ostatnich N dni (0 = bez filtra)",
+    ),
     retry_rounds: int = typer.Option(
         0,
         "--retry-rounds",
@@ -1115,8 +1169,9 @@ def gratka_live_all(
     """
     cfg = load_settings()
 
-    done_path = Path(cfg.io.out_dir) / "gratka_live_all_done.txt"
-    state_path = Path(cfg.io.out_dir) / "gratka_live_all_state.json"
+    suf = _last_days_suffix(last_days)
+    done_path = Path(cfg.io.out_dir) / f"gratka_live_all{suf}_done.txt"
+    state_path = Path(cfg.io.out_dir) / f"gratka_live_all{suf}_state.json"
 
     done = _load_done_regions(done_path)
     state = _load_json(state_path)
@@ -1180,6 +1235,7 @@ def gratka_live_all(
                     kind=kind or cfg.defaults.kind,
                     limit=limit,
                     max_pages=max_pages,
+                    last_days=(None if last_days <= 0 else last_days),
                     start_page=start_page,
                     user_agent=cfg.http.user_agent,
                     timeout_s=cfg.http.timeout_s,
@@ -1231,6 +1287,13 @@ def gratka_live_all_cities(
     max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    last_days: int = typer.Option(
+        30,
+        "--last-days",
+        min=0,
+        show_default=True,
+        help="Filtr: bierz oferty z ostatnich N dni (0 = bez filtra)",
+    ),
     retry_rounds: int = typer.Option(
         0,
         "--retry-rounds",
@@ -1249,8 +1312,9 @@ def gratka_live_all_cities(
     """LIVE-ALL po miastach (VOIVODESHIPS2) z resume + retry."""
     cfg = load_settings()
 
-    done_path = Path(cfg.io.out_dir) / "gratka_live_all_cities_done.txt"
-    state_path = Path(cfg.io.out_dir) / "gratka_live_all_cities_state.json"
+    suf = _last_days_suffix(last_days)
+    done_path = Path(cfg.io.out_dir) / f"gratka_live_all_cities{suf}_done.txt"
+    state_path = Path(cfg.io.out_dir) / f"gratka_live_all_cities{suf}_state.json"
 
     done = _load_done_regions(done_path)
     state = _load_json(state_path)
@@ -1312,6 +1376,7 @@ def gratka_live_all_cities(
                     kind=kind or cfg.defaults.kind,
                     limit=limit,
                     max_pages=max_pages,
+                    last_days=(None if last_days <= 0 else last_days),
                     start_page=start_page,
                     user_agent=cfg.http.user_agent,
                     timeout_s=cfg.http.timeout_s,

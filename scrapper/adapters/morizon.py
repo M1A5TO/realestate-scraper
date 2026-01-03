@@ -17,7 +17,7 @@ log = get_logger("scrapper.morizon")
 import hashlib
 import time
 from math import radians, sin, cos, asin, sqrt
-from datetime import datetime 
+from datetime import datetime, date, timedelta
 # ---------- Pomocnicze ----------
 
 _PL_BBOX = (49.0, 54.9, 14.0, 24.5)  # min_lat, max_lat, min_lon, max_lon (z lekkim marginesem)
@@ -601,6 +601,7 @@ class MorizonAdapter(BaseAdapter):
         deal: str,
         kind: str,
         max_pages: int | None = None,
+        recent_days: int | None = None,
         start_page: int = 1,
     ) -> Iterable[OfferIndex]:
         """
@@ -648,7 +649,16 @@ class MorizonAdapter(BaseAdapter):
                 self.discover_stop_reason = "max_pages"
                 break
 
-            url = f"{base_url}?page={page}"
+            params: dict[str, object] = {"page": page}
+            if recent_days is not None and int(recent_days) > 0:
+                # Morizon: ps[date_from]=YYYY-MM-DD (encoded as ps%5Bdate_from%5D)
+                try:
+                    cutoff = date.today() - timedelta(days=int(recent_days))
+                    params["ps[date_from]"] = cutoff.isoformat()
+                except Exception:
+                    pass
+
+            url = f"{base_url}?{urllib.parse.urlencode(params)}"
             try:
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
@@ -661,7 +671,7 @@ class MorizonAdapter(BaseAdapter):
             
             # Fallback - jeśli główny URL nie zwrócił linków, próbujemy alternatywnego
             if not links:
-                alt_url = f"{alt_base_url}?page={page}"
+                alt_url = f"{alt_base_url}?{urllib.parse.urlencode(params)}"
                 try:
                     html2 = self.http.get(alt_url, accept="text/html").text
                     links = _extract_offer_links(html2)

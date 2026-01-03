@@ -702,6 +702,7 @@ class GratkaAdapter(BaseAdapter):
         deal: str,
         kind: str,
         max_pages: int | None = None,
+        recent_days: int | None = None,
         start_page: int = 1,
     ) -> Iterable[OfferIndex]:
         """
@@ -724,12 +725,12 @@ class GratkaAdapter(BaseAdapter):
             "lokal": "lokale",
         }.get((kind or "").lower(), "mieszkania")
 
-        # Budowa szablonu URL (z miastem lub bez)
+        # Budowa bazowego URL (z miastem lub bez)
         if city:
             city_slug = _slug(city)
-            url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}?page={{}}"
+            base_url = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}"
         else:
-            url_template = f"https://gratka.pl/nieruchomosci/{kind_slug}?page={{}}"
+            base_url = f"https://gratka.pl/nieruchomosci/{kind_slug}"
 
         self.discover_last_page_done = 0
         self.discover_stop_reason = None
@@ -746,7 +747,17 @@ class GratkaAdapter(BaseAdapter):
                 self.discover_stop_reason = "max_pages"
                 break
 
-            url = url_template.format(page)
+            params: dict[str, object] = {"page": page}
+            if recent_days is not None and int(recent_days) > 0:
+                # Gratka: filtr z UI "ostatniego-miesiaca" (ostatnie 30 dni)
+                if int(recent_days) != 30:
+                    log.warning(
+                        "discover_recent_days_unsupported",
+                        extra={"extra": {"recent_days": int(recent_days), "using": 30}},
+                    )
+                params["data-dodania-search"] = "ostatniego-miesiaca"
+
+            url = base_url + "?" + urllib.parse.urlencode(params)
             try:
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:

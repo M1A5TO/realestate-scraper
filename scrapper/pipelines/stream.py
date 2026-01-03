@@ -166,6 +166,7 @@ def run_morizon_stream(
     kind: str,
     limit: int | None,        # limit OFERT
     max_pages: int | None,    # limit STRON  ← DODAJ
+    last_days: int | None = None,  # filtr: ostatnie N dni (0/None = bez filtra)
     start_page: int = 1,      # resume od tej strony (1 = od początku)
     user_agent: str,
     timeout_s: int,
@@ -198,6 +199,7 @@ def run_morizon_stream(
             deal=deal,
             kind=kind,
             max_pages=max_pages,
+            recent_days=last_days,
             start_page=start_page,
         )
         processed_count = 0
@@ -233,6 +235,7 @@ def run_gratka_stream(
     kind: str,
     limit: int | None,      # Limit OFERT (a nie stron)
     max_pages: int | None,
+    last_days: int | None = None,  # filtr: ostatnie N dni (0/None = bez filtra)
     start_page: int = 1,    # resume od tej strony (1 = od początku)
     user_agent: str,
     timeout_s: int,
@@ -264,6 +267,7 @@ def run_gratka_stream(
             deal=deal,
             kind=kind,
             max_pages=max_pages,
+            recent_days=last_days,
             start_page=start_page,
         )
         

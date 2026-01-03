@@ -12,6 +12,17 @@ Słowniczek pipeline’ów
 5) live      -> streaming: discover -> parse -> wysyłka do backendu (+ zdjęcia + rabbitmq)
 6) live-all  -> live po kolei dla województw + resume (state/done) + opcjonalne retry-rundy
 
+=========================
+FILTER: OSTATNIE N DNI
+=========================
+- Działa dla MORIZON + GRATKA w trybach: live / live-all / live-all-cities
+- Domyślnie: --last-days 30
+- Wyłączenie filtra: --last-days 0
+
+Uwaga o RESUME (żeby się nie mieszało):
+- Dla --last-days 30 pliki stanu mają suffix: *_last30d_state.json / *_last30d_done.txt
+- Dla --last-days 0 używane są stare nazwy bez suffixu
+
 Pliki RESUME (tylko dla live-all)
 - data/out/<source>_live_all_state.json  -> per-województwo: last_page_done, stop_reason, done
 - data/out/<source>_live_all_done.txt    -> lista ukończonych województw
@@ -44,17 +55,44 @@ MORIZON
 - LIVE (po mieście albo cały kraj):
   python -m scrapper.cli morizon live --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5
 
+  >>> OSTATNIE 30 DNI (domyślnie):
+  python -m scrapper.cli morizon live --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5 --last-days 30
+
 - LIVE-ALL (województwa + resume):
   python -m scrapper.cli morizon live-all --max-pages 200
+
+  >>> PEŁNY SKAN (bez filtra):
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 0
+
+  >>> OSTATNIE 30 DNI (domyślnie):
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 30
 
   Opcjonalnie: automatyczne retry rundy po fetch_fail:
   python -m scrapper.cli morizon live-all --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
 
+  >>> OSTATNIE 30 DNI + retry:
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+
+  >>> PEŁNY SKAN (bez filtra) + retry:
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
+
 - LIVE-ALL-CITIES (miasta + resume):
   python -m scrapper.cli morizon live-all-cities --max-pages 200
 
+  >>> PEŁNY SKAN (bez filtra):
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --last-days 0
+
+  >>> OSTATNIE 30 DNI (domyślnie):
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --last-days 30
+
   Opcjonalnie: automatyczne retry rundy po fetch_fail:
   python -m scrapper.cli morizon live-all-cities --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
+
+  >>> OSTATNIE 30 DNI + retry:
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+
+  >>> PEŁNY SKAN (bez filtra) + retry:
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
 
 - Sync stanu z zapisanego logu:
   python -m scrapper.cli morizon sync-done-from-log path\\to\\log.txt
@@ -70,17 +108,44 @@ GRATKA
 - LIVE:
   python -m scrapper.cli gratka live --city "Gdańsk" --deal sprzedaz --kind mieszkania --max-pages 5
 
+  >>> OSTATNIE 30 DNI (domyślnie):
+  python -m scrapper.cli gratka live --city "Gdańsk" --deal sprzedaz --kind mieszkania --max-pages 5 --last-days 30
+
 - LIVE-ALL (województwa + resume):
   python -m scrapper.cli gratka live-all --max-pages 200
+
+  >>> PEŁNY SKAN (bez filtra):
+  python -m scrapper.cli gratka live-all --max-pages 200 --last-days 0
+
+  >>> OSTATNIE 30 DNI (domyślnie):
+  python -m scrapper.cli gratka live-all --max-pages 200 --last-days 30
 
   Opcjonalnie: automatyczne retry rundy po fetch_fail:
   python -m scrapper.cli gratka live-all --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
 
+  >>> OSTATNIE 30 DNI + retry:
+  python -m scrapper.cli gratka live-all --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+
+  >>> PEŁNY SKAN (bez filtra) + retry:
+  python -m scrapper.cli gratka live-all --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
+
 - LIVE-ALL-CITIES (miasta + resume):
   python -m scrapper.cli gratka live-all-cities --max-pages 200
 
+  >>> PEŁNY SKAN (bez filtra):
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --last-days 0
+
+  >>> OSTATNIE 30 DNI (domyślnie):
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --last-days 30
+
   Opcjonalnie: automatyczne retry rundy po fetch_fail:
   python -m scrapper.cli gratka live-all-cities --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
+
+  >>> OSTATNIE 30 DNI + retry:
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+
+  >>> PEŁNY SKAN (bez filtra) + retry:
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
 
 - Sync stanu z zapisanego logu:
   python -m scrapper.cli gratka sync-done-from-log path\\to\\log.txt

@@ -1,0 +1,82 @@
+PIPELINEY FINAL (najważniejsze komendy)
+
+Założenia / skróty
+- Uruchamianie: python -m scrapper.cli <zrodlo> <komenda> [opcje]
+- Źródła: morizon, gratka
+- "Cała Polska" = brak --city (w LIVE) / listing bez sluga
+- TRYBY:
+  - live            -> jedna iteracja (bez resume/bez retry-rund)
+  - live-all        -> iteracja po WOJEWÓDZTWACH + resume + opcjonalne retry-rundy
+  - live-all-cities -> iteracja po MIASTACH + resume + opcjonalne retry-rundy
+
+Najważniejsze parametry
+- --max-pages N        : limit stron listingu (dla live/live-all/live-all-cities)
+- --limit N            : limit ofert (hamulec ofert w pętli stream)
+- --deal sprzedaz|wynajem          : (opcjonalne) domyślnie z configu
+- --kind mieszkanie|mieszkania|... : (opcjonalne) domyślnie z configu
+- --last-days N         : filtr „ostatnie N dni”
+  - jeśli chcesz ostatnie 30 dni: nie podawaj flagi (domyślnie) albo wpisz --last-days 30
+  - jeśli chcesz pełny skan (bez filtra): wpisz --last-days 0
+- --retry-rounds N      : ile dodatkowych rund po przejściu całej listy (tylko live-all / live-all-cities)
+- --retry-sleep-s SEC   : pauza między rundami retry (tylko live-all / live-all-cities)
+
+Uwaga o RESUME (ważne!)
+- Resume działa tylko dla live-all i live-all-cities.
+- Checkpointy (state/done) są rozdzielone per --last-days:
+  - last-days=30 -> pliki z suffixem *_last30d_*
+  - last-days=0  -> stare nazwy bez suffixu (pełny skan)
+- Żeby wznowić po crashu: uruchom tę samą komendę z tym samym --last-days.
+
+============================================================
+MORIZON
+============================================================
+
+1) CAŁA POLSKA (LIVE)
+- Ostatnie 30 dni (domyślnie):
+  python -m scrapper.cli morizon live --max-pages 200
+- Pełny skan (bez filtra):
+  python -m scrapper.cli morizon live --max-pages 200 --last-days 0
+
+2) WOJEWÓDZTWA (LIVE-ALL + RESUME)
+- Ostatnie 30 dni + retry (polecane):
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+- Pełny skan + retry:
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
+
+3) MIASTA (LIVE-ALL-CITIES + RESUME)
+- Ostatnie 30 dni + retry (polecane):
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+- Pełny skan + retry:
+  python -m scrapper.cli morizon live-all-cities --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
+
+4) LIMIT OFERT (przyspieszenie / testy)
+- Dodaj --limit, np. 500 ofert na region/miasto:
+  python -m scrapper.cli morizon live-all --max-pages 200 --last-days 30 --limit 500 --retry-rounds 200 --retry-sleep-s 120
+
+============================================================
+GRATKA
+============================================================
+
+1) CAŁA POLSKA (LIVE)
+- Ostatnie 30 dni (domyślnie):
+  python -m scrapper.cli gratka live --max-pages 200
+- Pełny skan (bez filtra):
+  python -m scrapper.cli gratka live --max-pages 200 --last-days 0
+
+2) WOJEWÓDZTWA (LIVE-ALL + RESUME)
+- Ostatnie 30 dni + retry (polecane):
+  python -m scrapper.cli gratka live-all --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+- Pełny skan + retry:
+  python -m scrapper.cli gratka live-all --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
+
+3) MIASTA (LIVE-ALL-CITIES + RESUME)
+- Ostatnie 30 dni + retry (polecane):
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --last-days 30 --retry-rounds 200 --retry-sleep-s 120
+- Pełny skan + retry:
+  python -m scrapper.cli gratka live-all-cities --max-pages 200 --last-days 0 --retry-rounds 200 --retry-sleep-s 120
+============================================================
+Szybkie FAQ
+============================================================
+- "Dlaczego pomija region/miasto?" -> bo jest DONE w plikach resume dla danego --last-days.
+- "Chcę start od zera" -> usuń odpowiednie pliki *_state.json oraz *_done.txt (dla trybu i last-days).
+- "Retry" -> działa tylko w live-all/live-all-cities (przy fetch_fail w discover).
