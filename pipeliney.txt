@@ -1,0 +1,85 @@
+PIPELINE'Y / KOMENDY CLI (scrapper)
+
+Uruchamianie (ogólnie)
+- Wszystkie komendy:  python -m scrapper.cli --help
+- Dla źródła:         python -m scrapper.cli <zrodlo> --help
+
+Słowniczek pipeline’ów
+1) discover  -> pobiera listę URL-i (zapisuje urls.csv do out_dir)
+2) detail    -> pobiera szczegóły ofert z urls.csv (zapisuje offers.csv)
+3) photos    -> pobiera/wysyła zdjęcia na podstawie offers.csv (zapisuje photos.csv i/lub obrazy)
+4) full      -> discover + detail + photos w jednym kroku
+5) live      -> streaming: discover -> parse -> wysyłka do backendu (+ zdjęcia + rabbitmq)
+6) live-all  -> live po kolei dla województw + resume (state/done) + opcjonalne retry-rundy
+
+Pliki RESUME (tylko dla live-all)
+- data/out/<source>_live_all_state.json  -> per-województwo: last_page_done, stop_reason, done
+- data/out/<source>_live_all_done.txt    -> lista ukończonych województw
+
+
+OTODOM
+- DISCOVER:
+  python -m scrapper.cli otodom discover --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5
+
+- DETAIL:
+  python -m scrapper.cli otodom detail --in-urls data/out/urls.csv
+
+- PHOTOS:
+  python -m scrapper.cli otodom photos --in-offers data/out/offers.csv --limit-photos 10
+
+- FULL:
+  python -m scrapper.cli otodom full --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5
+
+- LIVE (stream do backendu):
+  python -m scrapper.cli otodom live --city "Gdańsk" --deal sprzedaz --kind mieszkanie --limit 200
+
+
+MORIZON
+- DISCOVER / DETAIL / PHOTOS / FULL:
+  python -m scrapper.cli morizon discover --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5
+  python -m scrapper.cli morizon detail --in-urls data/out/urls.csv
+  python -m scrapper.cli morizon photos --in-offers data/out/offers.csv --limit-photos 10
+  python -m scrapper.cli morizon full --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5
+
+- LIVE (po mieście albo cały kraj):
+  python -m scrapper.cli morizon live --city "Gdańsk" --deal sprzedaz --kind mieszkanie --max-pages 5
+
+- LIVE-ALL (województwa + resume):
+  python -m scrapper.cli morizon live-all --max-pages 200
+
+  Opcjonalnie: automatyczne retry rundy po fetch_fail:
+  python -m scrapper.cli morizon live-all --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
+
+- Sync stanu z zapisanego logu:
+  python -m scrapper.cli morizon sync-done-from-log path\\to\\log.txt
+
+
+GRATKA
+- DISCOVER / DETAIL / PHOTOS / FULL:
+  python -m scrapper.cli gratka discover --city "Gdańsk" --deal sprzedaz --kind mieszkania --max-pages 5
+  python -m scrapper.cli gratka detail --in-urls data/out/urls.csv
+  python -m scrapper.cli gratka photos --in-offers data/out/offers.csv --limit-photos 10
+  python -m scrapper.cli gratka full --city "Gdańsk" --deal sprzedaz --kind mieszkania --max-pages 5
+
+- LIVE:
+  python -m scrapper.cli gratka live --city "Gdańsk" --deal sprzedaz --kind mieszkania --max-pages 5
+
+- LIVE-ALL (województwa + resume):
+  python -m scrapper.cli gratka live-all --max-pages 200
+
+  Opcjonalnie: automatyczne retry rundy po fetch_fail:
+  python -m scrapper.cli gratka live-all --max-pages 200 --retry-rounds 200 --retry-sleep-s 120
+
+- Sync stanu z zapisanego logu:
+  python -m scrapper.cli gratka sync-done-from-log path\\to\\log.txt
+
+
+TROJMIASTO
+- DISCOVER / DETAIL / PHOTOS / FULL:
+  python -m scrapper.cli trojmiasto discover --max-pages 5
+  python -m scrapper.cli trojmiasto detail --in-urls data/out/urls.csv
+  python -m scrapper.cli trojmiasto photos --in-offers data/out/offers.csv --limit-photos 10
+  python -m scrapper.cli trojmiasto full --max-pages 5
+
+- LIVE:
+  python -m scrapper.cli trojmiasto live --limit 200

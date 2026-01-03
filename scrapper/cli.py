@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 import json
 import re
+import time
 import typer
 
 from scrapper.config import load_settings
@@ -607,6 +608,20 @@ def morizon_live_all(
     max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    retry_rounds: int = typer.Option(
+        0,
+        "--retry-rounds",
+        min=0,
+        show_default=True,
+        help="Ile dodatkowych rund wykonać po zakończeniu listy województw, aby dokończyć regiony z fetch_fail",
+    ),
+    retry_sleep_s: int = typer.Option(
+        120,
+        "--retry-sleep-s",
+        min=0,
+        show_default=True,
+        help="Ile sekund czekać między rundami retry",
+    ),
 ):
     """
     Tryb LIVE-ALL:
@@ -636,66 +651,92 @@ def morizon_live_all(
                 remaining += 1
         typer.echo(f"[LIVE-ALL] resume enabled: remaining={remaining} state={state_path}")
 
-    for region in VOIVODESHIPS:
-        r_state = state.get(region) if isinstance(state.get(region), dict) else {}
-        is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
-        if is_done:
-            typer.echo(f"[LIVE-ALL] skip region={region} (already done)")
-            continue
+    # Wykonaj rundę 0 + opcjonalne rundy retry.
+    max_round = int(retry_rounds or 0)
+    for round_idx in range(0, max_round + 1):
+        if round_idx > 0 and retry_sleep_s > 0:
+            typer.echo(f"[LIVE-ALL] retry round={round_idx}/{max_round}: sleeping {retry_sleep_s}s")
+            time.sleep(retry_sleep_s)
 
-        last_page_done = 0
-        if isinstance(r_state, dict):
+        had_fetch_fail = False
+        remaining_before = 0
+        for r in VOIVODESHIPS:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining_before += 1
+
+        typer.echo(f"[LIVE-ALL] round={round_idx} remaining={remaining_before}")
+        if remaining_before == 0:
+            break
+
+        for region in VOIVODESHIPS:
+            r_state = state.get(region) if isinstance(state.get(region), dict) else {}
+            is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if is_done:
+                typer.echo(f"[LIVE-ALL] skip region={region} (already done)")
+                continue
+
+            last_page_done = 0
+            if isinstance(r_state, dict):
+                try:
+                    last_page_done = int(r_state.get("last_page_done") or 0)
+                except Exception:
+                    last_page_done = 0
+            start_page = max(1, last_page_done + 1)
+
+            typer.echo(f"[LIVE-ALL] start region={region}")
+
             try:
-                last_page_done = int(r_state.get("last_page_done") or 0)
-            except Exception:
-                last_page_done = 0
-        start_page = max(1, last_page_done + 1)
+                st = run_morizon_stream(
+                    city=region,
+                    deal=deal or cfg.defaults.deal,
+                    kind=kind or cfg.defaults.kind,
+                    limit=limit,
+                    max_pages=max_pages,
+                    start_page=start_page,
+                    user_agent=cfg.http.user_agent,
+                    timeout_s=cfg.http.timeout_s,
+                    rps=cfg.http.rate_limit_rps,
+                    http_proxy=cfg.http.http_proxy,
+                    https_proxy=cfg.http.https_proxy,
+                )
+            except Exception as e:
+                typer.echo(f"[LIVE-ALL] fail region={region} err={type(e).__name__}: {e}")
+                had_fetch_fail = True
+                continue
 
-        typer.echo(f"[LIVE-ALL] start region={region}")
+            # Aktualizacja stanu (nie oznaczaj jako done, jeśli discover przerwał na fetch_fail)
+            processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
+            last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
+            stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
 
-        try:
-            st = run_morizon_stream(
-                city=region,
-                deal=deal or cfg.defaults.deal,
-                kind=kind or cfg.defaults.kind,
-                limit=limit,
-                max_pages=max_pages,
-                start_page=start_page,
-                user_agent=cfg.http.user_agent,
-                timeout_s=cfg.http.timeout_s,
-                rps=cfg.http.rate_limit_rps,
-                http_proxy=cfg.http.http_proxy,
-                https_proxy=cfg.http.https_proxy,
-            )
-        except Exception as e:
-            typer.echo(f"[LIVE-ALL] fail region={region} err={type(e).__name__}: {e}")
-            continue
+            state.setdefault(region, {})
+            if not isinstance(state.get(region), dict):
+                state[region] = {}
 
-        # Aktualizacja stanu (nie oznaczaj jako done, jeśli discover przerwał na fetch_fail)
-        processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
-        last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
-        stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
+            state[region]["last_page_done"] = max(last_page_done, last_done)
+            state[region]["stop_reason"] = stop_reason
+            state[region]["processed_offers_last_run"] = processed
 
-        state.setdefault(region, {})
-        if not isinstance(state.get(region), dict):
-            state[region] = {}
+            if stop_reason == "fetch_fail":
+                had_fetch_fail = True
+                state[region]["done"] = False
+                _save_json(state_path, state)
+                typer.echo(
+                    f"[LIVE-ALL] incomplete region={region} (fetch_fail); will resume from page={state[region]['last_page_done'] + 1}"
+                )
+                continue
 
-        state[region]["last_page_done"] = max(last_page_done, last_done)
-        state[region]["stop_reason"] = stop_reason
-        state[region]["processed_offers_last_run"] = processed
-
-        if stop_reason == "fetch_fail":
-            state[region]["done"] = False
+            # Jeśli nie było fetch_fail, uznaj region za ukończony (nawet jeśli 0 ofert, np. brak wyników)
+            state[region]["done"] = True
             _save_json(state_path, state)
-            typer.echo(f"[LIVE-ALL] incomplete region={region} (fetch_fail); will resume from page={state[region]['last_page_done'] + 1}")
-            continue
+            _append_done_region(done_path, region)
+            done.add(region)
+            typer.echo(f"[LIVE-ALL] done region={region}")
 
-        # Jeśli nie było fetch_fail, uznaj region za ukończony (nawet jeśli 0 ofert, np. brak wyników)
-        state[region]["done"] = True
-        _save_json(state_path, state)
-        _append_done_region(done_path, region)
-        done.add(region)
-        typer.echo(f"[LIVE-ALL] done region={region}")
+        if not had_fetch_fail:
+            break
 
 
 @morizon.command("sync-done-from-log")
@@ -876,6 +917,20 @@ def gratka_live_all(
     max_pages: int = typer.Option(200, "--max-pages", "-p", min=1, show_default=True),
     deal: Optional[str] = typer.Option(None, "--deal", "-d"),
     kind: Optional[str] = typer.Option(None, "--kind", "-k"),
+    retry_rounds: int = typer.Option(
+        0,
+        "--retry-rounds",
+        min=0,
+        show_default=True,
+        help="Ile dodatkowych rund wykonać po zakończeniu listy województw, aby dokończyć regiony z fetch_fail",
+    ),
+    retry_sleep_s: int = typer.Option(
+        120,
+        "--retry-sleep-s",
+        min=0,
+        show_default=True,
+        help="Ile sekund czekać między rundami retry",
+    ),
 ):
     """
     Tryb LIVE-ALL:
@@ -905,64 +960,92 @@ def gratka_live_all(
                 remaining += 1
         typer.echo(f"[LIVE-ALL] resume enabled: remaining={remaining} state={state_path}")
 
-    for region in VOIVODESHIPS:
-        r_state = state.get(region) if isinstance(state.get(region), dict) else {}
-        is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
-        if is_done:
-            typer.echo(f"[LIVE-ALL] skip region={region} (already done)")
-            continue
+    # Wykonaj rundę 0 + opcjonalne rundy retry.
+    max_round = int(retry_rounds or 0)
+    for round_idx in range(0, max_round + 1):
+        if round_idx > 0 and retry_sleep_s > 0:
+            typer.echo(f"[LIVE-ALL] retry round={round_idx}/{max_round}: sleeping {retry_sleep_s}s")
+            time.sleep(retry_sleep_s)
 
-        last_page_done = 0
-        if isinstance(r_state, dict):
+        had_fetch_fail = False
+        remaining_before = 0
+        for r in VOIVODESHIPS:
+            r_state = state.get(r) if isinstance(state.get(r), dict) else {}
+            is_done = bool(r in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if not is_done:
+                remaining_before += 1
+
+        typer.echo(f"[LIVE-ALL] round={round_idx} remaining={remaining_before}")
+        if remaining_before == 0:
+            break
+
+        for region in VOIVODESHIPS:
+            r_state = state.get(region) if isinstance(state.get(region), dict) else {}
+            is_done = bool(region in done or (isinstance(r_state, dict) and r_state.get("done") is True))
+            if is_done:
+                typer.echo(f"[LIVE-ALL] skip region={region} (already done)")
+                continue
+
+            last_page_done = 0
+            if isinstance(r_state, dict):
+                try:
+                    last_page_done = int(r_state.get("last_page_done") or 0)
+                except Exception:
+                    last_page_done = 0
+            start_page = max(1, last_page_done + 1)
+
+            typer.echo(f"[LIVE-ALL] start region={region}")
+
             try:
-                last_page_done = int(r_state.get("last_page_done") or 0)
-            except Exception:
-                last_page_done = 0
-        start_page = max(1, last_page_done + 1)
+                st = run_gratka_stream(
+                    city=region,
+                    deal=deal or cfg.defaults.deal,
+                    kind=kind or cfg.defaults.kind,
+                    limit=limit,
+                    max_pages=max_pages,
+                    start_page=start_page,
+                    user_agent=cfg.http.user_agent,
+                    timeout_s=cfg.http.timeout_s,
+                    rps=cfg.http.rate_limit_rps,
+                    http_proxy=cfg.http.http_proxy,
+                    https_proxy=cfg.http.https_proxy,
+                )
+            except Exception as e:
+                typer.echo(f"[LIVE-ALL] fail region={region} err={type(e).__name__}: {e}")
+                # traktuj jak niedokończone; spróbujemy w kolejnych rundach
+                had_fetch_fail = True
+                continue
 
-        typer.echo(f"[LIVE-ALL] start region={region}")
+            processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
+            last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
+            stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
 
-        try:
-            st = run_gratka_stream(
-                city=region,
-                deal=deal or cfg.defaults.deal,
-                kind=kind or cfg.defaults.kind,
-                limit=limit,
-                max_pages=max_pages,
-                start_page=start_page,
-                user_agent=cfg.http.user_agent,
-                timeout_s=cfg.http.timeout_s,
-                rps=cfg.http.rate_limit_rps,
-                http_proxy=cfg.http.http_proxy,
-                https_proxy=cfg.http.https_proxy,
-            )
-        except Exception as e:
-            typer.echo(f"[LIVE-ALL] fail region={region} err={type(e).__name__}: {e}")
-            continue
+            state.setdefault(region, {})
+            if not isinstance(state.get(region), dict):
+                state[region] = {}
 
-        processed = int((st or {}).get("processed_offers", 0)) if isinstance(st, dict) else 0
-        last_done = int((st or {}).get("discover_last_page_done", 0)) if isinstance(st, dict) else 0
-        stop_reason = (st or {}).get("discover_stop_reason") if isinstance(st, dict) else None
+            state[region]["last_page_done"] = max(last_page_done, last_done)
+            state[region]["stop_reason"] = stop_reason
+            state[region]["processed_offers_last_run"] = processed
 
-        state.setdefault(region, {})
-        if not isinstance(state.get(region), dict):
-            state[region] = {}
+            if stop_reason == "fetch_fail":
+                had_fetch_fail = True
+                state[region]["done"] = False
+                _save_json(state_path, state)
+                typer.echo(
+                    f"[LIVE-ALL] incomplete region={region} (fetch_fail); will resume from page={state[region]['last_page_done'] + 1}"
+                )
+                continue
 
-        state[region]["last_page_done"] = max(last_page_done, last_done)
-        state[region]["stop_reason"] = stop_reason
-        state[region]["processed_offers_last_run"] = processed
-
-        if stop_reason == "fetch_fail":
-            state[region]["done"] = False
+            state[region]["done"] = True
             _save_json(state_path, state)
-            typer.echo(f"[LIVE-ALL] incomplete region={region} (fetch_fail); will resume from page={state[region]['last_page_done'] + 1}")
-            continue
+            _append_done_region(done_path, region)
+            done.add(region)
+            typer.echo(f"[LIVE-ALL] done region={region}")
 
-        state[region]["done"] = True
-        _save_json(state_path, state)
-        _append_done_region(done_path, region)
-        done.add(region)
-        typer.echo(f"[LIVE-ALL] done region={region}")
+        if not had_fetch_fail:
+            # Wszystkie niedokończone regiony domknęły się w tej rundzie
+            break
 
 
 @gratka.command("sync-done-from-log")
