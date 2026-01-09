@@ -30,30 +30,51 @@ def city_key(city: str) -> str:
 
 
 def load_teryt_map(path: str) -> dict[str, str]:
-    out: dict[str, str] = {}
+    # Zbieramy wszystkie możliwe oficjalne nazwy dla danego klucza.
+    # Potem do finalnej mapy przepuszczamy tylko klucze jednoznaczne (1 nazwa).
+    candidates: dict[str, set[str]] = {}
+
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        cols = reader.fieldnames or []
-
-        col = None
-        for c in cols:
-            if c.lower() in ("nazwa", "miasto", "city", "miejscowosc", "miejscowość"):
-                col = c
-                break
-        if col is None:
-            col = cols[0] if cols else None
-
-        if not col:
+        if not reader.fieldnames:
             print("TERYT_CSV does not have columns.")
             sys.exit(1)
 
+        if "Wejście" not in reader.fieldnames or "Nazwa w TERYT" not in reader.fieldnames:
+            print("TERYT_CSV must contain columns: 'Wejście' and 'Nazwa w TERYT'.")
+            sys.exit(1)
+
         for row in reader:
-            city = (row.get(col) or "").strip()
-            if not city:
+            raw_in = (row.get("Wejście") or "").strip()
+            official = (row.get("Nazwa w TERYT") or "").strip()
+            if not raw_in or not official:
                 continue
-            out.setdefault(city_key(city), city)
+
+            key = city_key(raw_in)
+            if not key:
+                continue
+
+            candidates.setdefault(key, set()).add(official)
+
+    # Finalna mapa: tylko klucze jednoznaczne
+    out: dict[str, str] = {}
+    ambiguous = []
+
+    for key, names in candidates.items():
+        if len(names) == 1:
+            out[key] = next(iter(names))
+        else:
+            ambiguous.append((key, sorted(names)))
+
+    # Informacyjnie (nie wpływa na działanie): ile kluczy pominięto
+    if ambiguous:
+        print(f"TERYT ambiguous keys skipped: {len(ambiguous)}")
+        # Jeśli chcesz wypisać je wszystkie, odkomentuj:
+        # for key, names in ambiguous:
+        #     print(f"  {key} -> {names}")
 
     return out
+
 
 
 def to_float(value):
@@ -66,19 +87,20 @@ def to_float(value):
 
 
 def should_delete(price: float | None, footage: float | None) -> tuple[bool, str]:
-    if price is None:
-        return True, "missing_price"
-    if price < MIN_PRICE:
-        return True, "price_too_low"
-    if price > MAX_PRICE:
-        return True, "price_too_high"
+    # DELETE tylko, gdy wartości są poza zakresem.
+    # Brak wartości (None) nie powoduje usunięcia.
 
-    if footage is None:
-        return True, "missing_footage"
-    if footage < MIN_FOOTAGE:
-        return True, "footage_too_low"
-    if footage > MAX_FOOTAGE:
-        return True, "footage_too_high"
+    if price is not None:
+        if price < MIN_PRICE:
+            return True, "price_too_low"
+        if price > MAX_PRICE:
+            return True, "price_too_high"
+
+    if footage is not None:
+        if footage < MIN_FOOTAGE:
+            return True, "footage_too_low"
+        if footage > MAX_FOOTAGE:
+            return True, "footage_too_high"
 
     return False, ""
 
@@ -93,8 +115,8 @@ def clean_database():
 
     print("Starting database cleanup")
     print(f"API: {API_BASE_URL}")
-    print(f"Price range: {MIN_PRICE}..{MAX_PRICE}")
-    print(f"Footage range: {MIN_FOOTAGE}..{MAX_FOOTAGE}")
+    print(f"Price range: {MIN_PRICE}..{MAX_PRICE} (delete only if outside)")
+    print(f"Footage range: {MIN_FOOTAGE}..{MAX_FOOTAGE} (delete only if outside)")
     print("-" * 60)
 
     with requests.Session() as session:
@@ -132,18 +154,18 @@ def clean_database():
                 price = to_float(data.get("price"))
                 footage = to_float(data.get("footage"))
 
-                city_official = None
+                # Miasto: patch tylko jeśli dopasowanie do TERYT istnieje
                 if city:
                     city_official = teryt_map.get(city_key(city))
+                    if city_official and city_official != city:
+                        patch = session.patch(url, json={"city": city_official}, timeout=TIMEOUT_S)
+                        if patch.status_code in (200, 204):
+                            city_updated_count += 1
+                            print(f"\nid {apartment_id}: city updated '{city}' -> '{city_official}'")
+                        else:
+                            print(f"\nid {apartment_id}: city update failed (HTTP {patch.status_code}) '{city}' -> '{city_official}'")
 
-                if city and city_official and city_official != city:
-                    patch = session.patch(url, json={"city": city_official}, timeout=TIMEOUT_S)
-                    if patch.status_code in (200, 204):
-                        city_updated_count += 1
-                        print(f"\nid {apartment_id}: city updated '{city}' -> '{city_official}'")
-                    else:
-                        print(f"\nid {apartment_id}: city update failed (HTTP {patch.status_code}) '{city}' -> '{city_official}'")
-
+                # DELETE tylko za price/footage poza zakresem
                 delete_it, reason = should_delete(price, footage)
                 if delete_it:
                     print(f"\nid {apartment_id}: {reason} (price={price}, footage={footage}) -> delete", end="")
