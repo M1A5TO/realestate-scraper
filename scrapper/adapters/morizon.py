@@ -17,7 +17,7 @@ log = get_logger("scrapper.morizon")
 import hashlib
 import time
 from math import radians, sin, cos, asin, sqrt
-from datetime import datetime 
+from datetime import datetime, date, timedelta
 # ---------- Pomocnicze ----------
 
 _PL_BBOX = (49.0, 54.9, 14.0, 24.5)  # min_lat, max_lat, min_lon, max_lon (z lekkim marginesem)
@@ -364,6 +364,11 @@ class MorizonAdapter(BaseAdapter):
     out_dir: Optional[Path] = None
     use_osm_geocode: bool = False
 
+    # Stan ostatniego discover (używane przez live-all/resume)
+    discover_last_page_done: int = 0
+    discover_stop_reason: str | None = None
+    discover_failed_page: int | None = None
+
     def with_deps(self, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http
         self.out_dir = out_dir
@@ -589,54 +594,139 @@ class MorizonAdapter(BaseAdapter):
 
         return data
 
-    def discover(self, city: str, deal: Optional[str], kind: Optional[str], max_pages: int = 1) -> list[OfferIndex]:
+    def discover(
+        self,
+        *,
+        city: str | None = None,
+        deal: str,
+        kind: str,
+        max_pages: int | None = None,
+        recent_days: int | None = None,
+        start_page: int = 1,
+    ) -> Iterable[OfferIndex]:
         """
-        Prosty, stabilny listing:
-        https://www.morizon.pl/{kategoria}/{miasto}/?page=N
-        gdzie kategoria ∈ {mieszkania, domy, dzialki, lokale}.
-        Parametr 'deal' (sprzedaz/wynajem) zostawiamy na później – na wielu listingach
-        sprzedaz jest domyślna, a oferty i tak mają w URL 'sprzedaz-...'.
+        Pobiera linki w trybie ciągłym.
+        city=None -> Cała Polska.
+        max_pages=None -> Do końca wyników.
         """
         assert self.http is not None
-        rows: list[OfferIndex] = []
         dedup_ids: set[str] = set()
+        no_new_pages = 0
+        # Mapowanie kategorii
+        category_map = {
+            "mieszkanie": "mieszkania", "mieszkania": "mieszkania",
+            "dom": "domy", "domy": "domy",
+            "dzialka": "dzialki", "dzialki": "dzialki",
+            "lokal": "lokale", "lokale": "lokale"
+        }
+        category = category_map.get((kind or "").lower(), "mieszkania")
 
-        category = _category_from_kind(kind)
-        city_slug = urllib.parse.quote((city or "").strip().lower().replace(" ", "-"))
+        # Konstrukcja bazowego URL
+        if city:
+            # np. gdansk
+            city_slug = urllib.parse.quote(city.strip().lower().replace(" ", "-"))
+            # Główny: https://www.morizon.pl/mieszkania/gdansk/
+            base_url = f"https://www.morizon.pl/{category}/{city_slug}/"
+            # Zapasowy: https://www.morizon.pl/nieruchomosci/mieszkania/gdansk/
+            alt_base_url = f"https://www.morizon.pl/nieruchomosci/{category}/{city_slug}/"
+        else:
+            # Cała Polska: https://www.morizon.pl/mieszkania/
+            base_url = f"https://www.morizon.pl/{category}/"
+            alt_base_url = f"https://www.morizon.pl/nieruchomosci/{category}/"
 
-        for page in range(1, int(max_pages) + 1):
-            url = f"https://www.morizon.pl/{category}/{city_slug}/?page={page}"
+        self.discover_last_page_done = 0
+        self.discover_stop_reason = None
+        self.discover_failed_page = None
+
+        page = max(1, int(start_page or 1))
+        while True:
+            # 1. Sprawdź limit stron
+            if max_pages is not None and page > max_pages:
+                log.info(
+                    "discover_stop_max_pages",
+                    extra={"extra": {"page": page}},
+                )
+                self.discover_stop_reason = "max_pages"
+                break
+
+            params: dict[str, object] = {"page": page}
+            if recent_days is not None and int(recent_days) > 0:
+                # Morizon: ps[date_from]=YYYY-MM-DD (encoded as ps%5Bdate_from%5D)
+                try:
+                    cutoff = date.today() - timedelta(days=int(recent_days))
+                    params["ps[date_from]"] = cutoff.isoformat()
+                except Exception:
+                    pass
+
+            url = f"{base_url}?{urllib.parse.urlencode(params)}"
             try:
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": url, "err": type(e).__name__}})
-                continue
+                self.discover_stop_reason = "fetch_fail"
+                self.discover_failed_page = page
+                break
 
             links = _extract_offer_links(html)
+            
+            # Fallback - jeśli główny URL nie zwrócił linków, próbujemy alternatywnego
             if not links:
-                # Spróbuj alternatywnego wejścia (np. /nieruchomosci/{kategoria}/{miasto}/?page=N)
-                alt = f"https://www.morizon.pl/nieruchomosci/{category}/{city_slug}/?page={page}"
+                alt_url = f"{alt_base_url}?{urllib.parse.urlencode(params)}"
                 try:
-                    html2 = self.http.get(alt, accept="text/html").text
+                    html2 = self.http.get(alt_url, accept="text/html").text
                     links = _extract_offer_links(html2)
                 except Exception:
-                    links = []
+                    pass # Jeśli też błąd, links pozostaje puste
 
+            # --- AUTO-STOP ---
+            if not links:
+                log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                self.discover_stop_reason = "no_links"
+                break
+
+            # --- ZBIERAMY NOWE OFERTY (BEZ yield) ---
+            new_items: list[tuple[str, str]] = []
             for href in links:
                 oid = _offer_id_from_url(href)
+                
+                # Deduplikacja
                 if not oid or oid in dedup_ids:
                     continue
+                new_items.append((oid, href))
+
+            # --- AUTO-STOP NA PODSTAWIE `new == 0` ---
+            if not new_items:
+                no_new_pages += 1
+            else:
+                no_new_pages = 0
+
+            if no_new_pages >= 2:
+                log.info(
+                    "discover_stop_no_new",
+                    extra={"extra": {"page": page}},
+                )
+                self.discover_stop_reason = "no_new"
+                break
+
+            # --- Yield (Wypluwamy wynik) ---
+            for oid, href in new_items:
                 dedup_ids.add(oid)
-                rows.append({
+                yield {
                     "offer_url": normalize_url(href),
                     "offer_id": oid,
                     "page_idx": page,
-                })
+                    "source": self.source
+                }
 
-            log.info("discover_page", extra={"extra": {"page": page, "found": len(links), "kept": len(rows)}})
+            log.info(
+                "discover_page_done",
+                extra={"extra": {"page": page, "found": len(links), "new": len(new_items)}},
+            )
 
-        return rows
-    
+            self.discover_last_page_done = page
+
+            page += 1
+
     def with_deps(self, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http
         self.out_dir = out_dir

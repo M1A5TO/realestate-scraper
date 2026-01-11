@@ -15,6 +15,9 @@ from scrapper.core.log import setup_json_logger, get_logger
 from scrapper.core.storage import offers_csv_path, append_offer_row, append_rows_csv
 from scrapper.core.validate import Offer
 
+from scrapper.config import load_settings
+from scrapper.core.backend import BackendClient
+
 REQ_FIELDS = ["price_amount","city","area_m2","rooms","lat","lon","offer_id","source"]
 OFFER_SCHEMA = ["offer_id","source","url","price_amount","price_currency","price_per_m2","city","lat","lon","area_m2","rooms"]
 
@@ -69,6 +72,10 @@ def run_otodom_detail(
         rps=rps,
         proxies=build_proxies(http_proxy, https_proxy),
     )
+
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
+
     ok = 0
     fail = 0
     batch: list[dict] = []
@@ -81,8 +88,21 @@ def run_otodom_detail(
                 data = adapter.parse_offer(u)
                 data.setdefault("first_seen", now)
                 data.setdefault("last_seen", now)
+
                 Offer(**data)  # walidacja typów/zakresów
+
                 if _is_complete(data):
+                    # KROK A: Sprawdź czy to duplikat
+                    if backend.check_duplicate(data):
+                        log.info("api_skip_duplicate", extra={"extra": {"offer_id": data.get("offer_id")}})
+                        # Jeśli duplikat -> POMIJAMY (continue), nie dodajemy do CSV, nie wysyłamy
+                        continue 
+                    # KROK B: Wyślij do bazy (Create)
+                    if backend.create_apartment(data):
+                        log.info("api_create_success", extra={"extra": {"offer_id": data.get("offer_id")}})
+                    else:
+                        log.warning("api_create_fail", extra={"extra": {"offer_id": data.get("offer_id")}})
+                    # KROK C: Zapisz do CSV (lokalna kopia tylko unikalnych ofert)
                     batch.append(data)
                     ok += 1
                 else:
@@ -152,6 +172,9 @@ def run_morizon_detail(
         proxies=build_proxies(http_proxy, https_proxy),
     )
 
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
+
     urls = _read_urls(urls_csv)
     if not urls:
         log.info("detail_no_input", extra={"extra": {"source": "morizon", "urls_csv": str(urls_csv)}})
@@ -195,8 +218,17 @@ def run_morizon_detail(
 
                 # Walidacja typów
                 Offer(**d)
-
-                # PROJEKCJA -> tylko docelowy schemat kolumn
+                # A. Sprawdzenie duplikatu
+                if backend.check_duplicate(d):
+                    log.info("skip_duplicate_api", extra={"extra": {"source": "morizon", "offer_id": d.get("offer_id")}})
+                    # Jeśli duplikat -> przerywamy przetwarzanie tej oferty (nie zapisujemy do CSV)
+                    continue
+                # B. Wysłanie do bazy (Create)
+                if backend.create_apartment(d):
+                    log.info("api_create_success", extra={"extra": {"source": "morizon", "offer_id": d.get("offer_id")}})
+                else:
+                    log.warning("api_create_fail", extra={"extra": {"source": "morizon", "offer_id": d.get("offer_id")}})
+                # PROJEKCJA -> tylko docelowy schemat kolumn (Zapis do CSV jako backup)
                 batch.append(_project_offer_row(d))
                 ok += 1
 
@@ -204,7 +236,7 @@ def run_morizon_detail(
                 fail += 1
                 if dump_debug:
                     log.warning("detail_validate_fail", extra={"extra":{"source":"morizon","url":u,"err":"ValidationError","fields":list(e.errors())}})
-            except Exception:
+            except Exception as e: 
                 fail += 1
                 # zrzut HTML do analizy
                 try:
@@ -214,7 +246,7 @@ def run_morizon_detail(
                 except Exception:
                     pass
                 if dump_debug:
-                    log.warning("detail_parse_fail", extra={"extra":{"source":"morizon","url":u,"err":"ParseError"}})
+                    log.warning("detail_parse_fail", extra={"extra":{"source":"morizon","url":u,"err":type(e).__name__}}) # <--- Teraz zadziała type(e)
 
             # zapis wsadowy co 50
             if len(batch) >= 50:
@@ -249,7 +281,8 @@ def run_gratka_detail(
     dump_debug: bool = True,
 ) -> dict:
     log = setup_json_logger("scrapper")
-    # wczytaj URL-e
+
+    # Funkcja wewnętrzna do czytania URLi
     def _read_urls(csv_path: Path) -> list[str]:
         if not csv_path.exists():
             return []
@@ -270,25 +303,42 @@ def run_gratka_detail(
         user_agent=user_agent, timeout_s=timeout_s, rps=rps,
         proxies=build_proxies(http_proxy, https_proxy),
     )
+
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
+
     adapter = GratkaAdapter().with_deps(http=http, out_dir=out_dir, use_osm_geocode=True)
     ok = 0
     fail = 0
     batch: list[dict] = []
 
-
     for u in urls:
         try:
             d = adapter.parse_offer(u)
             d.setdefault("source", "gratka")
+            
             missing = [k for k in REQ_FIELDS if d.get(k) in (None, "")]
             if missing:
                 fail += 1
                 if dump_debug:
                     log.warning("detail_incomplete_skip", extra={"extra":{"source":"gratka","url":u,"missing":missing}})
                 continue
-            Offer(**d)  # walidacja typów
-            batch.append(_project_offer_row(d))  # <-- TUTAJ PROJEKCJA DO SCHEMATU
+            # Walidacja typów (Pydantic)
+            Offer(**d)
+            # A. Sprawdzenie duplikatu
+            if backend.check_duplicate(d):
+                log.info("skip_duplicate_api", extra={"extra": {"source": "gratka", "offer_id": d.get("offer_id")}})
+                # Jeśli duplikat -> przerywamy (nie zapisujemy do CSV)
+                continue
+            # B. Wysłanie do bazy (Create)
+            if backend.create_apartment(d):
+                log.info("api_create_success", extra={"extra": {"source": "gratka", "offer_id": d.get("offer_id")}})
+            else:
+                log.warning("api_create_fail", extra={"extra": {"source": "gratka", "offer_id": d.get("offer_id")}})
+            # Zapis do batcha (tylko jeśli nie duplikat)
+            batch.append(_project_offer_row(d))
             ok += 1
+
         except ValidationError as e:
             fail += 1
             if dump_debug:
@@ -300,21 +350,18 @@ def run_gratka_detail(
 
         if len(batch) >= 50:
             out_csv = offers_csv_path(out_dir)
-            append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)  # <-- ZAPIS TYLKO TYCH KOLUMN I W TEJ KOLEJNOŚCI
+            append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
             batch.clear()
 
-    # flush końcowy
+    # Flush końcowy
     if batch:
         out_csv = offers_csv_path(out_dir)
         append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
-
-
 
     log.info("detail_done", extra={"extra": {"source": "gratka", "ok": ok, "fail": fail}})
     return {"offers_ok": ok, "offers_fail": fail}
 
 # --- TROJMIASTO ---
-
 def run_trojmiasto_detail(
     *,
     urls_csv: Path,
@@ -337,6 +384,9 @@ def run_trojmiasto_detail(
         rps=rps,
         proxies=build_proxies(http_proxy, https_proxy),
     )
+
+    cfg = load_settings()
+    backend = BackendClient(api_url=cfg.http.api_url)
 
     urls = _read_urls(urls_csv)
     if not urls:
@@ -371,14 +421,19 @@ def run_trojmiasto_detail(
                     fail += 1
                     log.warning("detail_incomplete_skip", extra={"extra": {"source": "trojmiasto", "url": u, "missing": missing}})
                     continue
-
-                # Walidacja typów/zakresów
                 Offer(**d)
-
-                # PROJEKCJA → zapisujemy tylko docelowy schemat kolumn
+                # A. Sprawdzenie duplikatu
+                if backend.check_duplicate(d):
+                    log.info("skip_duplicate_api", extra={"extra": {"source": "trojmiasto", "offer_id": d.get("offer_id")}})
+                    continue # Pomijamy zapis
+                # B. Wysłanie do bazy (Create)
+                if backend.create_apartment(d):
+                    log.info("api_create_success", extra={"extra": {"source": "trojmiasto", "offer_id": d.get("offer_id")}})
+                else:
+                    log.warning("api_create_fail", extra={"extra": {"source": "trojmiasto", "offer_id": d.get("offer_id")}})
+                # PROJEKCJA → zapisujemy tylko docelowy schemat kolumn (backup CSV)
                 batch.append(_project_offer_row(d))
                 ok += 1
-
             except ValidationError as e:
                 fail += 1
                 if dump_debug:
@@ -387,13 +442,11 @@ def run_trojmiasto_detail(
                 fail += 1
                 if dump_debug:
                     log.warning("detail_parse_fail", extra={"extra": {"source": "trojmiasto", "url": u, "err": type(e).__name__}})
-
             # zapis wsadowy co 50
             if len(batch) >= 50:
                 out_csv = offers_csv_path(out_dir)
                 append_rows_csv(out_csv, batch, header=OFFER_SCHEMA)
                 batch.clear()
-
         # flush końcowy
         if batch:
             out_csv = offers_csv_path(out_dir)

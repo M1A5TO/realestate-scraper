@@ -184,44 +184,87 @@ class TrojmiastoAdapter(BaseAdapter):
         self.out_dir = out_dir
         return self
 
-    def discover(self, *, city: str, deal: str, kind: str, max_pages: int = 1) -> Iterable[OfferIndex]:
+    def discover(self, *, city: str | None = None, deal: str, kind: str, max_pages: int | None = None) -> Iterable[OfferIndex]:
+        """
+        Pobiera linki w trybie ciągłym.
+        city=None -> Całe Trójmiasto (domyślnie).
+        max_pages=None -> Do końca wyników.
+        """
         assert self.http is not None
+        
         deal_map = {"sprzedaz": "sprzedaż", "wynajem": "wynajem"}
         kind_map = {
-            "mieszkanie": "Mieszkanie", "dom": "Dom",
-            "dzialka": "Działka", "lokal": "Lokal",
+            "mieszkanie": "Mieszkanie", "mieszkania": "Mieszkanie",
+            "dom": "Dom", "domy": "Dom",
+            "dzialka": "Działka", "dzialki": "Działka",
+            "lokal": "Lokal", "lokale": "Lokal",
         }
+        
         deal_slug = deal_map.get(str(deal).lower(), "sprzedaż")
         kind_slug = kind_map.get(str(kind).lower(), "Mieszkanie")
-        search_slug = f"{kind_slug} na {deal_slug}"
+        
+        # Budujemy frazę wyszukiwania, np. "Mieszkanie na sprzedaż Gdańsk"
+        if city:
+            search_slug = f"{kind_slug} na {deal_slug} {city}"
+        else:
+            search_slug = f"{kind_slug} na {deal_slug}"
+            
         search_slug_encoded = urllib.parse.quote(search_slug)
         base_url = f"https://ogloszenia.trojmiasto.pl/nieruchomosci/s,{search_slug_encoded}.html"
-        rows: list[OfferIndex] = []
+        
         dedup_ids: set[str] = set()
-        for page in range(1, int(max_pages) + 1):
+        page = 1
+        
+        while True:
+            # 1. Sprawdź limit stron (jeśli podano)
+            if max_pages is not None and page > max_pages:
+                break
+
+            # Uwaga: Trojmiasto używa parametru '?strona='
             page_url = f"{base_url}?strona={page}" if page > 1 else base_url
+            
             try:
                 html = self.http.get(page_url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": page_url, "err": type(e).__name__}})
-                continue
+                break
+
             bs = soup(html)
             links = bs.select('a[href*="/nieruchomosci-"][href*="ogl"]')
+            
+            # --- AUTO-STOP ---
+            if not links:
+                log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                break
+
             found_links_count = 0
             for a in links:
                 href = a.get("href")
                 if not href: continue
+                
                 full_url = normalize_url(join_url(base_url, href))
                 oid = _offer_id_from_url(full_url)
+                
                 if not oid or oid in dedup_ids: continue
                 dedup_ids.add(oid)
-                rows.append({"offer_url": full_url, "offer_id": oid, "page_idx": page})
+                
+                # Yield zamiast append
+                yield {
+                    "offer_url": full_url,
+                    "offer_id": oid,
+                    "page_idx": page,
+                    "source": self.source
+                }
                 found_links_count += 1
-            log.info("discover_page", extra={"extra": {"page": page, "found": found_links_count, "kept": len(rows)}})
-            if not links or found_links_count == 0:
-                log.info("discover_finish_no_more_links", extra={"extra": {"page": page}})
+            
+            log.info("discover_page_done", extra={"extra": {"page": page, "new": found_links_count}})
+            
+            # Zabezpieczenie: jeśli na stronie nie było nowych linków (np. koniec wyników, ale strona istnieje), przerywamy
+            if found_links_count == 0:
+                log.info("discover_finished_empty", extra={"extra": {"page": page}})
                 break
-        return rows
+
+            page += 1
 
     # --- OSTATECZNA WERSJA parse_offer (hybrydowa) ---
     

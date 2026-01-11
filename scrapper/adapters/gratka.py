@@ -24,6 +24,22 @@ _PL_DATE_RE = re.compile(
     r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$"
 )
 
+def _addr_has(addr: dict, keys: list[str], needle_norm: str | None) -> bool:
+    """
+    Sprawdza, czy w którymś z podanych pól adresu występuje (po normalizacji) zadany fragment.
+    Używa tego samej normalizacji co _norm().
+    """
+    if not needle_norm:
+        return True  # nic do sprawdzania
+    for k in keys:
+        v = addr.get(k)
+        if not v:
+            continue
+        if needle_norm in _norm(v):
+            return True
+    return False
+
+
 def _to_iso_datetime(s: str | None) -> str | None:
     if not s:
         return None
@@ -308,27 +324,105 @@ def _extract_geo_from_dom(html: str) -> tuple[Optional[float], Optional[float]]:
         pass
     return None, None
 def _osm_geocode_pl(http: HttpClient, *, street: str | None, district: str | None, city: str | None) -> tuple[Optional[float], Optional[float]]:
-    # buduj zapytanie od najbardziej szczegółowego do ogólnego
-    candidates = []
+    """
+    Geokodowanie z Nominatim dla adresów w Polsce:
+    - najpierw próbujemy najbardziej szczegółowych zapytań (ulica + dzielnica + miasto),
+    - potem ulica + miasto,
+    - potem dzielnica + miasto,
+    - na końcu (city-only) TYLKO jeśli naprawdę nie mamy ulicy ani dzielnicy.
+    Wynik musi pasować do miasta, a przy bardziej szczegółowych zapytaniach także do ulicy / dzielnicy.
+    """
+    street_n   = _norm(street)   if street   else None
+    district_n = _norm(district) if district else None
+    city_n     = _norm(city)     if city     else None
+
+    q_specs: list[tuple[str, dict]] = []
+
+    # 1) ulica + dzielnica + miasto
+    if street and district and city:
+        q_specs.append((
+            ", ".join([street, district, city, "Polska"]),
+            {"need_city": True, "need_street": True, "need_district": False},
+        ))
+
+    # 2) ulica + miasto
     if street and city:
-        candidates.append(", ".join([street, city, "Polska"]))
+        q_specs.append((
+            ", ".join([street, city, "Polska"]),
+            {"need_city": True, "need_street": True, "need_district": False},
+        ))
+
+    # 3) dzielnica + miasto
     if district and city:
-        candidates.append(", ".join([district, city, "Polska"]))
-    if city:
-        candidates.append(", ".join([city, "Polska"]))
+        q_specs.append((
+            ", ".join([district, city, "Polska"]),
+            {"need_city": True, "need_street": False, "need_district": True},
+        ))
+
+    # 4) tylko miasto – TYLKO jeśli nie mamy ani ulicy, ani dzielnicy
+    if city and not (street or district):
+        q_specs.append((
+            ", ".join([city, "Polska"]),
+            {"need_city": True, "need_street": False, "need_district": False},
+        ))
+
     from urllib.parse import urlencode
-    for q in candidates:
+    base_url = "https://nominatim.openstreetmap.org/search"
+
+    for q, spec in q_specs:
         try:
-            url = "https://nominatim.openstreetmap.org/search?" + urlencode({
-                "q": q, "format": "jsonv2", "limit": "1", "countrycodes": "pl", "addressdetails": "0"
+            url = base_url + "?" + urlencode({
+                "q": q,
+                "format": "jsonv2",
+                "limit": "3",
+                "countrycodes": "pl",
+                "addressdetails": "1",
             })
             data = http.get(url, accept="application/json").json()
-            if isinstance(data, list) and data:
-                la = _coerce_float(data[0].get("lat")); lo = _coerce_float(data[0].get("lon"))
-                if _is_plausible_pl(la, lo):
-                    return la, lo
         except Exception:
             continue
+
+        if not isinstance(data, list):
+            continue
+
+        for rec in data:
+            if not isinstance(rec, dict):
+                continue
+
+            la = _coerce_float(rec.get("lat"))
+            lo = _coerce_float(rec.get("lon"))
+            if not _is_plausible_pl(la, lo):
+                continue
+
+            addr = rec.get("address") or {}
+            if not isinstance(addr, dict):
+                addr = {}
+
+            # 1) Miasto musi pasować (city/town/village/municipality lub display_name)
+            if spec.get("need_city") and city_n:
+                if not _addr_has(addr, ["city", "town", "village", "municipality", "county"], city_n):
+                    dn = rec.get("display_name") or ""
+                    if city_n not in _norm(dn):
+                        continue
+
+            # 2) Ulica – wymagamy przy zapytaniach ze street
+            if spec.get("need_street") and street_n:
+                if not _addr_has(addr, ["road", "pedestrian", "footway", "residential"], street_n):
+                    dn = rec.get("display_name") or ""
+                    if street_n not in _norm(dn):
+                        continue
+
+            # 3) Dzielnica – wymagamy tylko, gdy spec mówi need_district=True
+            if spec.get("need_district") and district_n:
+                if not _addr_has(addr, ["suburb", "neighbourhood", "city_district", "borough"], district_n):
+                    dn = rec.get("display_name") or ""
+                    if district_n not in _norm(dn):
+                        continue
+
+            # Jeśli dotarliśmy tutaj, adres wygląda sensownie
+            return la, lo
+
+    # nic sensownego nie znaleziono
     return None, None
 
 
@@ -354,18 +448,54 @@ def _price_from_nodes(soup_obj) -> tuple[Optional[float], Optional[float], Optio
 
 
 def _area_rooms_from_nodes(soup_obj) -> tuple[Optional[float], Optional[float]]:
-    # wg prompt: data-cy="detailsRowTextNumberOfRooms", data-cy="detailsRowTextArea"
+    """
+    Spróbuj wyciągnąć powierzchnię i liczbę pokoi:
+    1) ze starych pól [data-cy='detailsRowTextNumberOfRooms'] / [data-cy='detailsRowTextArea']
+    2) z nowego bloku .details-highlighted-parameters__item (Pokoje / Powierzchnia)
+    """
+    rooms: Optional[float] = None
+    area: Optional[float] = None
+
+    # --- 1) Stare selektory data-cy (dla kompatybilności) ---
     rooms_txt = select_text(soup_obj, "[data-cy='detailsRowTextNumberOfRooms']")
     area_txt  = select_text(soup_obj, "[data-cy='detailsRowTextArea']")
-    rooms = None; area = None
+
     if rooms_txt:
         m = re.search(r"(\d+)", rooms_txt)
         if m:
             rooms = _coerce_float(m.group(1))
+
     if area_txt:
-        m = re.search(r"([\d\s.,]+)\s*m", area_txt)
-        if m:
-            area = _coerce_float(m.group(1))
+        # użyj helpera, który radzi sobie z przecinkami/spacjami
+        a = only_digits_float(area_txt)
+        if a is not None:
+            area = a
+
+    # --- 2) Nowy layout: "highlighted parameters" ---
+    # <div class="details-highlighted-parameters__item-label">Pokoje</div>
+    # <div class="details-highlighted-parameters__item-value"><strong>4</strong></div>
+    if rooms is None or area is None:
+        for item in soup_obj.select(".details-highlighted-parameters__item"):
+            label_el = item.select_one(".details-highlighted-parameters__item-label")
+            value_el = item.select_one(".details-highlighted-parameters__item-value")
+            if not (label_el and value_el):
+                continue
+
+            label = (label_el.get_text(" ", strip=True) or "").lower()
+            value = value_el.get_text(" ", strip=True) or ""
+
+            # Liczba pokoi
+            if rooms is None and "pokoj" in label:
+                m = re.search(r"(\d+)", value)
+                if m:
+                    rooms = _coerce_float(m.group(1))
+
+            # Powierzchnia (np. "71,31 m² + balkon 3,62 m²")
+            if area is None and ("powierzchnia" in label or "m²" in value.lower()):
+                a = only_digits_float(value)
+                if a is not None:
+                    area = a
+
     return area, rooms
 
 def _clean_street(s: str | None) -> str | None:
@@ -407,20 +537,50 @@ def _address_from_nodes(soup_obj) -> tuple[Optional[str], Optional[str], Optiona
         if street and city:
             break
 
-    # 2) Header lokalizacji na stronie
+    # 2) Header lokalizacji na stronie:
+    # <h2 class="location-row__header--with-map location-row__header">
+    #   <span>Chmielna</span>
+    #   <div class="location-row__main-location">
+    #     <span>Gdańsk,</span><span>Stare Miasto</span>
+    #   </div>
+    # </h2>
     if not (city and (district or street)):
-        hdr = soup_obj.select_one(".location-row__header, .location-row__header--with-map") \
-              or soup_obj.select_one(".location-row__second_column h2")
+        hdr = (
+            soup_obj.select_one(".location-row__header--with-map.location-row__header")
+            or soup_obj.select_one(".location-row__header")
+            or soup_obj.select_one(".location-row__left h2")
+            or soup_obj.select_one(".location-row__second_column h2")
+        )
         if hdr:
-            spans = [el.get_text(strip=True).rstrip(",") for el in hdr.select("span") if el.get_text(strip=True)]
-            if spans:
+            spans = [
+                el.get_text(" ", strip=True).rstrip(",")
+                for el in hdr.select("span")
+                if el.get_text(strip=True)
+            ]
+            # Jeśli mamy 3 spany: [ulica, miasto, dzielnica]
+            if len(spans) >= 3:
+                street = street or clean_spaces(spans[0])
+                city = city or clean_spaces(spans[1])
+                district = district or clean_spaces(spans[2])
+            elif len(spans) == 2:
+                # Bez ulicy: [miasto, dzielnica]
                 city = city or clean_spaces(spans[0])
-                if len(spans) >= 2:
-                    district = district or clean_spaces(spans[1])
-                # ulica bywa w „.main-location”
-                ml = hdr.select_one(".main-location")
-                if ml and not street:
-                    street = clean_spaces(ml.get_text(strip=True))
+                district = district or clean_spaces(spans[1])
+            elif len(spans) == 1:
+                city = city or clean_spaces(spans[0])
+
+            # Dodatkowo spróbuj wyciągnąć miasto/dzielnicę z bloku location-row__main-location
+            ml = hdr.select_one(".location-row__main-location, .main-location")
+            if ml:
+                sub_spans = [
+                    el.get_text(" ", strip=True).rstrip(",")
+                    for el in ml.select("span")
+                    if el.get_text(strip=True)
+                ]
+                if sub_spans:
+                    city = city or clean_spaces(sub_spans[0])
+                    if len(sub_spans) >= 2:
+                        district = district or clean_spaces(sub_spans[1])
 
     # 3) Breadcrumb/alternatywy
     if not (city and (district or street)):
@@ -497,7 +657,7 @@ def _extract_offer_links_from_listing(html: str, city_name: str) -> list[str]:
     uniq, seen = [], set()
     for u in links:
         m = re.search(r"/ob/(\d+)", u)
-        key = f"gratka-{m.group(1)}" if m else u
+        key = f"{m.group(1)}" if m else u
         if key in seen:
             continue
         seen.add(key)
@@ -523,6 +683,11 @@ class GratkaAdapter(BaseAdapter):
     out_dir: Optional[Path] = None
     use_osm_geocode: bool = False
 
+    # Stan ostatniego discover (używane przez live-all/resume)
+    discover_last_page_done: int = 0
+    discover_stop_reason: str | None = None
+    discover_failed_page: int | None = None
+
     def with_deps(self, *, http: HttpClient, out_dir: Path, use_osm_geocode: bool = False):
         self.http = http
         self.out_dir = out_dir
@@ -530,12 +695,25 @@ class GratkaAdapter(BaseAdapter):
         return self
 
     # ---------- DISCOVER ----------
-    def discover(self, *, city: str, deal: str, kind: str, max_pages: int = 1) -> Iterable[OfferIndex]:
+    def discover(
+        self,
+        *,
+        city: str | None = None,
+        deal: str,
+        kind: str,
+        max_pages: int | None = None,
+        recent_days: int | None = None,
+        start_page: int = 1,
+    ) -> Iterable[OfferIndex]:
+        """
+        Pobiera linki w trybie ciągłym.
+        city=None -> Cała Polska.
+        max_pages=None -> Do końca wyników.
+        """
         assert self.http is not None
-        rows: list[OfferIndex] = []
         dedup: set[str] = set()
+        no_new_pages = 0
 
-        # kategorie: "mieszkania", "domy", "dzialki", "lokale" → mapuj po Twojej logice
         kind_slug = {
             "mieszkania": "mieszkania",
             "mieszkanie": "mieszkania",
@@ -547,30 +725,98 @@ class GratkaAdapter(BaseAdapter):
             "lokal": "lokale",
         }.get((kind or "").lower(), "mieszkania")
 
-        city_slug = _slug(city)
+        # Budowa bazowego URL (z miastem lub bez)
+        if city:
+            city_slug = _slug(city)
+            base_url = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}"
+        else:
+            base_url = f"https://gratka.pl/nieruchomosci/{kind_slug}"
 
-        for page in range(1, int(max_pages) + 1):
-            url = f"https://gratka.pl/nieruchomosci/{kind_slug}/{city_slug}?page={page}"
+        self.discover_last_page_done = 0
+        self.discover_stop_reason = None
+        self.discover_failed_page = None
+
+        page = max(1, int(start_page or 1))
+        while True:
+            # 1. Sprawdź limit stron (jeśli podano)
+            if max_pages is not None and page > max_pages:
+                log.info(
+                    "discover_stop_max_pages",
+                    extra={"extra": {"page": page}},
+                )
+                self.discover_stop_reason = "max_pages"
+                break
+
+            params: dict[str, object] = {"page": page}
+            if recent_days is not None and int(recent_days) > 0:
+                # Gratka: filtr z UI "ostatniego-miesiaca" (ostatnie 30 dni)
+                if int(recent_days) != 30:
+                    log.warning(
+                        "discover_recent_days_unsupported",
+                        extra={"extra": {"recent_days": int(recent_days), "using": 30}},
+                    )
+                params["data-dodania-search"] = "ostatniego-miesiaca"
+
+            url = base_url + "?" + urllib.parse.urlencode(params)
             try:
                 html = self.http.get(url, accept="text/html").text
             except Exception as e:
                 log.warning("discover_fetch_fail", extra={"extra": {"url": url, "err": type(e).__name__}})
-                continue
+                self.discover_stop_reason = "fetch_fail"
+                self.discover_failed_page = page
+                break
 
-            links = _extract_offer_links_from_listing(html, city)
-            kept = 0
+            # Jeśli city=None, przekazujemy pusty string, żeby funkcja nie filtrowała po nazwie miasta
+            links = _extract_offer_links_from_listing(html, city if city else "")
+            
+            # --- AUTO-STOP ---
+            if not links:
+                log.info("discover_finished", extra={"extra": {"page": page, "reason": "no_links"}})
+                self.discover_stop_reason = "no_links"
+                break
+
+            # --- ZBIERAMY NOWE OFERTY (BEZ yield) ---
+            new_items: list[tuple[str, str]] = []
             for href in links:
                 m = re.search(r"/ob/(\d+)", href)
-                offer_id = f"gratka-{m.group(1)}" if m else ""
+                offer_id = f"{m.group(1)}" if m else ""
+
                 if offer_id and offer_id in dedup:
                     continue
+                new_items.append((offer_id, href))
+
+            # --- AUTO-STOP NA PODSTAWIE `new == 0` ---
+            if not new_items:
+                no_new_pages += 1
+            else:
+                no_new_pages = 0
+
+            if no_new_pages >= 2:
+                log.info(
+                    "discover_stop_no_new",
+                    extra={"extra": {"page": page}},
+                )
+                self.discover_stop_reason = "no_new"
+                break
+
+            # --- Yield zamiast append ---
+            for offer_id, href in new_items:
                 dedup.add(offer_id or href)
-                rows.append({"offer_url": href, "offer_id": offer_id, "page_idx": page})
-                kept += 1
+                yield {
+                    "offer_url": href,
+                    "offer_id": offer_id,
+                    "page_idx": page,
+                    "source": self.source
+                }
 
-            log.info("discover_page", extra={"extra": {"page": page, "found": len(links), "kept": kept}})
+            log.info(
+                "discover_page_done",
+                extra={"extra": {"page": page, "found": len(links), "new": len(new_items)}},
+            )
 
-        return rows
+            self.discover_last_page_done = page
+
+            page += 1
 
 
     def write_urls_csv(self, rows: Iterable[OfferIndex]) -> Path:
@@ -599,7 +845,7 @@ class GratkaAdapter(BaseAdapter):
         if not out.get("offer_id"):
             m = re.search(r"/ob/(\d+)", url)
             if m:
-                out["offer_id"] = f"gratka-{m.group(1)}"
+                out["offer_id"] = f"{m.group(1)}"
         # 1) LD+JSON
         for block in _extract_ld_json_blocks(html):
             d = _from_ld(block)
@@ -656,14 +902,16 @@ class GratkaAdapter(BaseAdapter):
                 if iso:
                     out["updated_at"] = iso
 
-        # 8) GEO: DOM/JSON → OSM
+        # 8) GEO: DOM/JSON → OSM fallback
         la, lo = _extract_geo_any(html)
         if _is_plausible_pl(la, lo):
             out["lat"], out["lon"] = la, lo
-        elif self.use_osm_geocode:
+        else:
+            # Gratka obecnie nie podaje jawnie współrzędnych – próbuj geokodować
             la, lo = _osm_geocode_pl(self.http, street=street, district=district, city=city)
             if _is_plausible_pl(la, lo):
                 out["lat"], out["lon"] = la, lo
+
 
 
         # 9) Gdy znamy pa i area, uzupełnij ppm2; gdy znamy pa i ppm2, skoryguj area spójną regułą
@@ -725,13 +973,23 @@ class GratkaAdapter(BaseAdapter):
                         urls.append(normalize_url(join_url("https://gratka.pl", best)))
 
         # deduplikacja z zachowaniem kolejności
+        # deduplikacja z zachowaniem kolejności
         seen = set()
-        out: list[str] = []
+        out = []  # Tu będą słowniki
+        seq = 0
+        
         for u in urls:
             if u in seen:
                 continue
             seen.add(u)
-            out.append(u)
+            
+            # --- ZMIANA: Pakujemy w słownik, żeby stream.py nie krzyczał ---
+            out.append({
+                "url": u,
+                "seq": seq
+            })
+            seq += 1
+            
         return out
 
 
