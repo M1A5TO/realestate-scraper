@@ -1,6 +1,0 @@
-Uruchomienie sciągania:
-python -m scrapper.cli otodom discover --city "Gdańsk" --deal "sprzedaz" --max-pages 1
-
-Parsowanie szczgułów:
-python -m scrapper.cli otodom detail
-python -m scrapper.cli otodom detail --in-urls data/out/urls_test.csv
