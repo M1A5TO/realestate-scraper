@@ -1588,7 +1588,6 @@ def trojmiasto_live(
         rps=cfg.http.rate_limit_rps,
         http_proxy=cfg.http.http_proxy,
         https_proxy=cfg.http.https_proxy,
-        max_pages=max_pages,
     )
 
 if __name__ == "__main__":
